@@ -224,7 +224,7 @@ public class CatAgent : Agent
             // 古いクリック履歴を引く
             leftDownSum -= leftDownHistory.Dequeue();
             leftHoldSum -= leftHoldHistory.Dequeue();
-            rightDownSum -= rightHoldHistory.Dequeue();
+            rightDownSum -= rightDownHistory.Dequeue();
             rightHoldSum -= rightHoldHistory.Dequeue();
         }
 
