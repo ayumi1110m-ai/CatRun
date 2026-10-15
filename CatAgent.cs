@@ -76,11 +76,6 @@ public class CatAgent : Agent
         rightClickDownSignal = 0f;
         rightHoldSignal = 0f;
 
-        jumpLeftDownWhenJumped = 0f;
-        jumpLeftHoldWhenJumped = 0f;
-        jumpRightDownWhenJumped = 0f;
-        jumpRightHoldWhenJumped = 0f;
-
         // 履歴のリセット
         jumpHistory.Clear();
         moveHistory.Clear();
