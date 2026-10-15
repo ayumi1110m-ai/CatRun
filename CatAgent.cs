@@ -29,12 +29,17 @@ public class CatAgent : Agent
     private float leftHoldSignal = 0f;
     private float rightClickDownSignal = 0f;
     private float rightHoldSignal = 0f;
+    
+    //直近50ステップのクリック履歴管理用
+    private Queue<float> leftDownHistory = new Queue<float>();
+    private Queue<float> leftHoldHistory = new Queue<float>();
+    private Queue<float> rightDownHistory = new Queue<float>();
+    private Queue<float> rightHoldHistory = new Queue<float>();
 
-    // ジャンプした「瞬間」にどの合図が出ていたかの記憶（スナップショット）
-    private float jumpLeftDownWhenJumped = 0f;
-    private float jumpLeftHoldWhenJumped = 0f;
-    private float jumpRightDownWhenJumped = 0f;
-    private float jumpRightHoldWhenJumped = 0f;
+    private float leftDownSum = 0f;
+    private float leftHoldSum = 0f;
+    private float rightDownSum = 0f;
+    private float rightHoldSum = 0f;
 
     // --- 簡易UI表示用 ---
     private string feedbackText = "";
@@ -79,13 +84,26 @@ public class CatAgent : Agent
         // 履歴のリセット
         jumpHistory.Clear();
         moveHistory.Clear();
+        leftDownHistory.Clear();
+        leftHoldHistory.Clear();
+        rightDownHistory.Clear();
+        rightHoldHistory.Clear();
+        
         jumpCountInHistory = 0;
         moveSumInHistory = 0f;
+        leftDownSum = 0f;
+        leftHoldSum = 0f;
+        rightDownSum = 0f;
+        rightHoldSum = 0f;
 
         for (int i = 0; i < HISTORY_SIZE; i++)
         {
             jumpHistory.Enqueue(0f);
             moveHistory.Enqueue(0f);
+            leftDownHistory.Enqueue(0f);
+            leftHoldHistory.Enqueue(0f);
+            rightDownHistory.Enqueue(0f);
+            rightHoldHistory.Enqueue(0f);
         }
     }
 
@@ -172,11 +190,11 @@ public class CatAgent : Agent
         sensor.AddObservation(rightClickDownSignal);
         sensor.AddObservation(rightHoldSignal);
 
-        // 9〜12：ジャンプした「瞬間」にどの合図が出ていたかの記憶
-        sensor.AddObservation(jumpLeftDownWhenJumped);
-        sensor.AddObservation(jumpLeftHoldWhenJumped);
-        sensor.AddObservation(jumpRightDownWhenJumped);
-        sensor.AddObservation(jumpRightHoldWhenJumped);
+        // 9〜12：直近のクリック・ホールドの傾向（平均）を渡す
+        sensor.AddObservation(leftDownSum / HISTORY_SIZE);
+        sensor.AddObservation(leftHoldSum / HISTORY_SIZE);
+        sensor.AddObservation(rightDownSum / HISTORY_SIZE);
+        sensor.AddObservation(rightHoldSum / HISTORY_SIZE);
 
         // 13：直近のジャンプ傾向
         sensor.AddObservation((float)jumpCountInHistory / HISTORY_SIZE);
@@ -203,6 +221,11 @@ public class CatAgent : Agent
         {
             jumpCountInHistory -= (int)jumpHistory.Dequeue();
             moveSumInHistory -= moveHistory.Dequeue();
+            // 古いクリック履歴を引く
+            leftDownSum -= leftDownHistory.Dequeue();
+            leftHoldSum -= leftHoldHistory.Dequeue();
+            rightDownSum -= rightHoldHistory.Dequeue();
+            rightHoldSum -= rightHoldHistory.Dequeue();
         }
 
         int jVal = (jump == jumpRate) ? 1 : 0;
@@ -212,6 +235,23 @@ public class CatAgent : Agent
         float mVal = (move == 1) ? -1.0f : (move == 2) ? 1.0f : 0f;
         moveHistory.Enqueue(mVal);
         moveSumInHistory += mVal;
+
+        // 現在のクリック状態を履歴に新しい順で入れる
+        float ldVal = leftClickDownSignal;
+        leftDownHistory.Enqueue(ldVal);
+        leftDownSum += ldVal;
+
+        float lhVal = leftHoldSignal;
+        leftHoldHistory.Enqueue(lhVal);
+        leftHoldSum += lhVal;
+
+        float rdVal = rightClickDownSignal;
+        rightDownHistory.Enqueue(rdVal);
+        rightDownSum += rdVal;
+
+        float rhVal = rightHoldSignal;
+        rightHoldHistory.Enqueue(rhVal);
+        rightHoldSum += rhVal;
 
         // --- 横移動処理 ---
         Vector2 vel = rb.linearVelocity;
@@ -225,12 +265,6 @@ public class CatAgent : Agent
             vel.y = jumpForce;
             isGrounded = false;
             jumpCooldownTimer = jumpCooldownTime;
-
-            // ジャンプした瞬間の全入力シグナルを記憶する
-            jumpLeftDownWhenJumped = leftClickDownSignal;
-            jumpLeftHoldWhenJumped = leftHoldSignal;
-            jumpRightDownWhenJumped = rightClickDownSignal;
-            jumpRightHoldWhenJumped = rightHoldSignal;
         }
 
         lastJumpInput = (jump == jumpRate);
