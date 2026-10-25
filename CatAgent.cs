@@ -6,313 +6,244 @@ using System.Collections.Generic;
 
 public class CatAgent : Agent
 {
-    private Rigidbody2D rb;
-    public float moveSpeed = 2f;
-    public float jumpForce = 5f;
-    private bool isGrounded = true;
+    private Rigidbody2D rb;
+    public float moveSpeed = 2f;
 
-    private Vector3 lastMousePos;
-    private Vector2 mouseVelocity;
+    // ジャンプの最小・最大初速（インスペクターで調整可能）
+    public float jumpForceMin = 3.0f;
+    public float jumpForceMax = 10.0f;
 
-    // --- ブレーキ（連打防止）用 ---
-    private bool lastJumpInput = false;
-    private float jumpCooldownTimer = 0f;
-    public float jumpCooldownTime = 0.2f;
+    private bool isGrounded = true;
 
-    // --- 左右クリック・ホールド判定用変数 ---
-    private float leftHoldTimer = 0f;
-    private float rightHoldTimer = 0f;
-    public float holdThreshold = 0.2f; // 0.2秒以上で長押し（ホールド）判定
+    private Vector3 lastMousePos;
+    private Vector2 mouseVelocity;
 
-    // 現在の入力シグナル（0.0 or 1.0）
-    private float leftClickDownSignal = 0f;
-    private float leftHoldSignal = 0f;
-    private float rightClickDownSignal = 0f;
-    private float rightHoldSignal = 0f;
-    
-    //直近50ステップのクリック履歴管理用
-    private Queue<float> leftDownHistory = new Queue<float>();
-    private Queue<float> leftHoldHistory = new Queue<float>();
-    private Queue<float> rightDownHistory = new Queue<float>();
-    private Queue<float> rightHoldHistory = new Queue<float>();
+    private bool lastJumpInput = false;
+    public int jumpRate = 99;
 
-    private float leftDownSum = 0f;
-    private float leftHoldSum = 0f;
-    private float rightDownSum = 0f;
-    private float rightHoldSum = 0f;
+    private float leftHoldTimer = 0f;
+    private float rightHoldTimer = 0f;
+    public float holdThreshold = 0.2f;
 
-    // --- 簡易UI表示用 ---
-    private string feedbackText = "";
-    private float feedbackTimer = 0f;
-    private Color feedbackColor = Color.white;
+    private float leftClickLatch = 0f;
+    private float rightClickLatch = 0f;
+    private float observedLeftClick = 0f;
+    private float observedRightClick = 0f;
+    private float leftHoldSignal = 0f;
+    private float rightHoldSignal = 0f;
 
-    // --- 行動履歴管理（直近50ステップ＝約4秒分） ---
-    private const int HISTORY_SIZE = 50;
-    private Queue<float> jumpHistory = new Queue<float>();
-    private Queue<float> moveHistory = new Queue<float>();
-    private int jumpCountInHistory = 0;
-    private float moveSumInHistory = 0f;
+    private Queue<float> leftDownHistory = new Queue<float>();
+    private Queue<float> leftHoldHistory = new Queue<float>();
+    private Queue<float> rightDownHistory = new Queue<float>();
+    private Queue<float> rightHoldHistory = new Queue<float>();
 
-    // --- クリックされてからの経過時間（ステップ数）管理用 ---
-    private float stepsSinceLastLeftClick = 999f;
-    private float stepsSinceLastRightClick = 999f;
-    private const float MAX_TIME_WINDOW = 100f; // 記憶する最大ステップ数の上限
+    private float leftDownSum = 0f;
+    private float leftHoldSum = 0f;
+    private float rightDownSum = 0f;
+    private float rightHoldSum = 0f;
 
-    public int jumpRate = 19;
+    private string feedbackText = "";
+    private float feedbackTimer = 0f;
+    private Color feedbackColor = Color.white;
 
-    public override void Initialize()
-    {
-        rb = GetComponent<Rigidbody2D>();
-    }
+    private const int HISTORY_SIZE = 50;
+    private float stepsSinceLastLeftClick = 999f;
+    private float stepsSinceLastRightClick = 999f;
+    private const float MAX_TIME_WINDOW = 100f;
 
-    public override void OnEpisodeBegin()
-    {
-        transform.localPosition = new Vector3(0, 1, 0);
-        rb.linearVelocity = Vector2.zero;
-        lastMousePos = Camera.main.ScreenToWorldPoint(Input.mousePosition);
+    public override void Initialize()
+    {
+        rb = GetComponent<Rigidbody2D>();
+    }
 
-        lastJumpInput = false;
-        jumpCooldownTimer = 0f;
-        leftHoldTimer = 0f;
-        rightHoldTimer = 0f;
+    public override void OnEpisodeBegin()
+    {
+        transform.localPosition = new Vector3(0, 1, 0);
+        rb.linearVelocity = Vector2.zero;
+        lastMousePos = Camera.main.ScreenToWorldPoint(Input.mousePosition);
 
-        leftClickDownSignal = 0f;
-        leftHoldSignal = 0f;
-        rightClickDownSignal = 0f;
-        rightHoldSignal = 0f;
+        lastJumpInput = false;
+        leftHoldTimer = 0f;
+        rightHoldTimer = 0f;
 
-        // 履歴のリセット
-        jumpHistory.Clear();
-        moveHistory.Clear();
-        leftDownHistory.Clear();
-        leftHoldHistory.Clear();
-        rightDownHistory.Clear();
-        rightHoldHistory.Clear();
-        
-        jumpCountInHistory = 0;
-        moveSumInHistory = 0f;
-        leftDownSum = 0f;
-        leftHoldSum = 0f;
-        rightDownSum = 0f;
-        rightHoldSum = 0f;
+        leftClickLatch = 0f;
+        rightClickLatch = 0f;
+        observedLeftClick = 0f;
+        observedRightClick = 0f;
+        leftHoldSignal = 0f;
+        rightHoldSignal = 0f;
 
-        //タイマーを最大値にリセット
-        stepsSinceLastLeftClick = 999f;
-        stepsSinceLastRightClick = 999f;
+        leftDownHistory.Clear();
+        leftHoldHistory.Clear();
+        rightDownHistory.Clear();
+        rightHoldHistory.Clear();
 
-        for (int i = 0; i < HISTORY_SIZE; i++)
-        {
-            jumpHistory.Enqueue(0f);
-            moveHistory.Enqueue(0f);
-            leftDownHistory.Enqueue(0f);
-            leftHoldHistory.Enqueue(0f);
-            rightDownHistory.Enqueue(0f);
-            rightHoldHistory.Enqueue(0f);
-        }
-    }
+        leftDownSum = 0f;
+        leftHoldSum = 0f;
+        rightDownSum = 0f;
+        rightHoldSum = 0f;
 
-    void Update()
-    {
-        // クールダウンタイマー更新
-        if (jumpCooldownTimer > 0f)
-        {
-            jumpCooldownTimer -= Time.unscaledDeltaTime;
-            if (jumpCooldownTimer < 0f) jumpCooldownTimer = 0f;
-        }
+        stepsSinceLastLeftClick = 999f;
+        stepsSinceLastRightClick = 999f;
 
-        // フィードバック表示タイマー更新
-        if (feedbackTimer > 0f)
-        {
-            feedbackTimer -= Time.deltaTime;
-        }
+        for (int i = 0; i < HISTORY_SIZE; i++)
+        {
+            leftDownHistory.Enqueue(0f);
+            leftHoldHistory.Enqueue(0f);
+            rightDownHistory.Enqueue(0f);
+            rightHoldHistory.Enqueue(0f);
+        }
+    }
 
-        // マウス移動速度の計算
-        Vector3 currentMousePos = Camera.main.ScreenToWorldPoint(Input.mousePosition);
-        mouseVelocity = (currentMousePos - lastMousePos) / Time.deltaTime;
-        lastMousePos = currentMousePos;
+    void Update()
+    {
+        if (feedbackTimer > 0f)
+        {
+            feedbackTimer -= Time.deltaTime;
+        }
 
-        // --- 左クリックのワンクリック ＆ ホールド判定 ---
-        if (Input.GetMouseButton(0))
-        {
-            leftHoldTimer += Time.deltaTime;
-        }
-        else
-        {
-            leftHoldTimer = 0f;
-        }
-        leftClickDownSignal = Input.GetMouseButtonDown(0) ? 1.0f : 0.0f;
-        leftHoldSignal = (leftHoldTimer >= holdThreshold) ? 1.0f : 0.0f;
+        Vector3 currentMousePos = Camera.main.ScreenToWorldPoint(Input.mousePosition);
+        mouseVelocity = (currentMousePos - lastMousePos) / Time.deltaTime;
+        lastMousePos = currentMousePos;
 
-        // --- 右クリックのワンクリック ＆ ホールド判定 ---
-        if (Input.GetMouseButton(1))
-        {
-            rightHoldTimer += Time.deltaTime;
-        }
-        else
-        {
-            rightHoldTimer = 0f;
-        }
-        rightClickDownSignal = Input.GetMouseButtonDown(1) ? 1.0f : 0.0f;
-        rightHoldSignal = (rightHoldTimer >= holdThreshold) ? 1.0f : 0.0f;
+        if (Input.GetMouseButtonDown(0)) leftClickLatch = 1f;
+        if (Input.GetMouseButtonDown(1)) rightClickLatch = 1f;
 
-        // --- 指示厨システム（Z: 褒める, X: 叱る） ---
-        if (Input.GetKeyDown(KeyCode.Z)) 
-        {
-            AddReward(1.0f);
-            ShowFeedback("✨ 褒めた！ (+1.0)", Color.green);
-        }
-        if (Input.GetKeyDown(KeyCode.X)) 
-        {
-            AddReward(-1.0f);
-            ShowFeedback("💥 叱った！ (-1.0)", Color.red);
-        }
-    }
+        if (Input.GetMouseButton(0)) leftHoldTimer += Time.deltaTime;
+        else leftHoldTimer = 0f;
 
-    private void ShowFeedback(string text, Color color)
-    {
-        feedbackText = text;
-        feedbackColor = color;
-        feedbackTimer = 0.8f;
-        Debug.Log(text);
-    }
+        if (Input.GetMouseButton(1)) rightHoldTimer += Time.deltaTime;
+        else rightHoldTimer = 0f;
 
-    public override void CollectObservations(VectorSensor sensor)
-    {
-        Vector3 mousePos = Camera.main.ScreenToWorldPoint(Input.mousePosition);
+        leftHoldSignal = (leftHoldTimer >= holdThreshold) ? 1.0f : 0.0f;
+        rightHoldSignal = (rightHoldTimer >= holdThreshold) ? 1.0f : 0.0f;
 
-        // 1・2：カーソルとの相対位置（X, Y）
-        sensor.AddObservation(mousePos.x - transform.position.x);
-        sensor.AddObservation(mousePos.y - transform.position.y);
+        if (Input.GetKeyDown(KeyCode.Z))
+        {
+            AddReward(1.0f);
+            ShowFeedback("褒めた！ (+1.0)", Color.green);
+        }
+        if (Input.GetKeyDown(KeyCode.X))
+        {
+            AddReward(-1.0f);
+            ShowFeedback("叱った！ (-1.0)", Color.red);
+        }
+    }
 
-        // 3・4：カーソルの移動速度（X, Y）
-        sensor.AddObservation(mouseVelocity.x);
-        sensor.AddObservation(mouseVelocity.y);
+    private void ShowFeedback(string text, Color color)
+    {
+        feedbackText = text;
+        feedbackColor = color;
+        feedbackTimer = 0.8f;
+        Debug.Log(text);
+    }
 
-        // 5〜8：現在のプレイヤーの入力状態（左右クリックのダウン＆ホールド）
-        sensor.AddObservation(leftClickDownSignal);
-        sensor.AddObservation(leftHoldSignal);
-        sensor.AddObservation(rightClickDownSignal);
-        sensor.AddObservation(rightHoldSignal);
+    public override void CollectObservations(VectorSensor sensor)
+    {
+        Vector3 mousePos = Camera.main.ScreenToWorldPoint(Input.mousePosition);
 
-        // 9〜12：直近のクリック・ホールドの傾向（平均）を渡す
-        sensor.AddObservation(leftDownSum / HISTORY_SIZE);
-        sensor.AddObservation(leftHoldSum / HISTORY_SIZE);
-        sensor.AddObservation(rightDownSum / HISTORY_SIZE);
-        sensor.AddObservation(rightHoldSum / HISTORY_SIZE);
+        observedLeftClick = leftClickLatch;
+        observedRightClick = rightClickLatch;
+        leftClickLatch = 0f;
+        rightClickLatch = 0f;
 
-        // 13・14：最後にクリックされてからの経過時間（0.0が直前、1.0が遠い過去）
-        sensor.AddObservation(Mathf.Clamp(stepsSinceLastLeftClick, 0f, MAX_TIME_WINDOW) / MAX_TIME_WINDOW);
-        sensor.AddObservation(Mathf.Clamp(stepsSinceLastRightClick, 0f, MAX_TIME_WINDOW) / MAX_TIME_WINDOW);
+        sensor.AddObservation(mousePos.x - transform.position.x);
+        sensor.AddObservation(mousePos.y - transform.position.y);
+        sensor.AddObservation(mouseVelocity.x);
+        sensor.AddObservation(mouseVelocity.y);
+        sensor.AddObservation(rb.linearVelocity.x);
+        sensor.AddObservation(rb.linearVelocity.y);
+        sensor.AddObservation(isGrounded ? 1f : 0f);
 
-        // 15：直近のジャンプ傾向
-        sensor.AddObservation((float)jumpCountInHistory / HISTORY_SIZE);
+        sensor.AddObservation(observedLeftClick);
+        sensor.AddObservation(leftHoldSignal);
+        sensor.AddObservation(observedRightClick);
+        sensor.AddObservation(rightHoldSignal);
 
-        // 16：直近の横移動傾向
-        sensor.AddObservation(moveSumInHistory / HISTORY_SIZE);
-    }
+        sensor.AddObservation(leftDownSum / HISTORY_SIZE);
+        sensor.AddObservation(leftHoldSum / HISTORY_SIZE);
+        sensor.AddObservation(rightDownSum / HISTORY_SIZE);
+        sensor.AddObservation(rightHoldSum / HISTORY_SIZE);
 
-    public override void WriteDiscreteActionMask(IDiscreteActionMask actionMask)
-    {
-        if (jumpCooldownTimer > 0f || !isGrounded)
-        {
-            actionMask.SetActionEnabled(1, jumpRate, false);
-        }
-    }
+        sensor.AddObservation(Mathf.Clamp(stepsSinceLastLeftClick, 0f, MAX_TIME_WINDOW) / MAX_TIME_WINDOW);
+        sensor.AddObservation(Mathf.Clamp(stepsSinceLastRightClick, 0f, MAX_TIME_WINDOW) / MAX_TIME_WINDOW);
+    }
 
-    public override void OnActionReceived(ActionBuffers actions)
-    {
-        int move = actions.DiscreteActions[0]; // 0:止まる, 1:左, 2:右
-        int jump = actions.DiscreteActions[1]; // 0~:跳ばない, 19:跳ぶ
+    public override void WriteDiscreteActionMask(IDiscreteActionMask actionMask)
+    {
+        if (!isGrounded)
+        {
+            actionMask.SetActionEnabled(1, jumpRate, false);
+        }
+    }
 
-        // --- 履歴（リングバッファ）の更新 ---
-        if (jumpHistory.Count >= HISTORY_SIZE)
-        {
-            jumpCountInHistory -= (int)jumpHistory.Dequeue();
-            moveSumInHistory -= moveHistory.Dequeue();
-            // 古いクリック履歴を引く
-            leftDownSum -= leftDownHistory.Dequeue();
-            leftHoldSum -= leftHoldHistory.Dequeue();
-            rightDownSum -= rightDownHistory.Dequeue();
-            rightHoldSum -= rightHoldHistory.Dequeue();
-        }
+    public override void OnActionReceived(ActionBuffers actions)
+    {
+        int move = actions.DiscreteActions[0]; // 0:止まる, 1:左, 2:右
+        int jump = actions.DiscreteActions[1]; // jumpRate のときだけ跳ぶ（元の仕様）
 
-        int jVal = (jump == jumpRate) ? 1 : 0;
-        jumpHistory.Enqueue(jVal);
-        jumpCountInHistory += jVal;
+        // 連続値（-1〜1 を 0〜1 に変換してジャンプの強さにする）
+        float rawContinuous = actions.ContinuousActions[0];
+        float jumpPowerNormalized = Mathf.Clamp01((rawContinuous + 1f) * 0.5f);
 
-        float mVal = (move == 1) ? -1.0f : (move == 2) ? 1.0f : 0f;
-        moveHistory.Enqueue(mVal);
-        moveSumInHistory += mVal;
+        if (leftDownHistory.Count >= HISTORY_SIZE)
+        {
+            leftDownSum -= leftDownHistory.Dequeue();
+            leftHoldSum -= leftHoldHistory.Dequeue();
+            rightDownSum -= rightDownHistory.Dequeue();
+            rightHoldSum -= rightHoldHistory.Dequeue();
+        }
 
-        // 現在のクリック状態を履歴に新しい順で入れる
-        float ldVal = leftClickDownSignal;
-        leftDownHistory.Enqueue(ldVal);
-        leftDownSum += ldVal;
+        leftDownHistory.Enqueue(observedLeftClick);
+        leftDownSum += observedLeftClick;
+        leftHoldHistory.Enqueue(leftHoldSignal);
+        leftHoldSum += leftHoldSignal;
+        rightDownHistory.Enqueue(observedRightClick);
+        rightDownSum += observedRightClick;
+        rightHoldHistory.Enqueue(rightHoldSignal);
+        rightHoldSum += rightHoldSignal;
 
-        float lhVal = leftHoldSignal;
-        leftHoldHistory.Enqueue(lhVal);
-        leftHoldSum += lhVal;
+        Vector2 vel = rb.linearVelocity;
+        if (move == 0) vel.x = 0;
+        else if (move == 1) vel.x = -moveSpeed;
+        else if (move == 2) vel.x = moveSpeed;
 
-        float rdVal = rightClickDownSignal;
-        rightDownHistory.Enqueue(rdVal);
-        rightDownSum += rdVal;
+        bool wantJump = (jump == jumpRate);
+        if (wantJump && !lastJumpInput && isGrounded)
+        {
+            // 連続値で決まった高さを適用
+            float currentJumpForce = Mathf.Lerp(jumpForceMin, jumpForceMax, jumpPowerNormalized);
+            vel.y = currentJumpForce;
+            isGrounded = false;
+        }
 
-        float rhVal = rightHoldSignal;
-        rightHoldHistory.Enqueue(rhVal);
-        rightHoldSum += rhVal;
+        lastJumpInput = wantJump;
+        rb.linearVelocity = vel;
 
-        // --- 横移動処理 ---
-        Vector2 vel = rb.linearVelocity;
-        if (move == 0) vel.x = 0;
-        else if (move == 1) vel.x = -moveSpeed;
-        else if (move == 2) vel.x = moveSpeed;
+        if (observedLeftClick > 0f) stepsSinceLastLeftClick = 0f;
+        else stepsSinceLastLeftClick += 1f;
 
-        // --- ジャンプ処理 ---
-        if (jump == jumpRate && !lastJumpInput && isGrounded && jumpCooldownTimer <= 0f)
-        {
-            vel.y = jumpForce;
-            isGrounded = false;
-            jumpCooldownTimer = jumpCooldownTime;
-        }
+        if (observedRightClick > 0f) stepsSinceLastRightClick = 0f;
+        else stepsSinceLastRightClick += 1f;
+    }
 
-        lastJumpInput = (jump == jumpRate);
-        rb.linearVelocity = vel;
+    private void OnCollisionStay2D(Collision2D collision) => isGrounded = true;
+    private void OnCollisionExit2D(Collision2D collision) => isGrounded = false;
 
-        // --- クリック経過タイマーの更新 ---
-        if (leftClickDownSignal > 0f)
-        {
-            stepsSinceLastLeftClick = 0f; // 左クリックされたら0にリセット
-        }
-        else
-        {
-            stepsSinceLastLeftClick += 1f; // 押されてなければ時間を進める
-        }
+    private void OnGUI()
+    {
+        GUIStyle hint = new GUIStyle();
+        hint.fontSize = 16;
+        hint.normal.textColor = Color.white;
+        GUI.Label(new Rect(16, 16, 520, 40), "Z:褒める  X:叱る", hint);
 
-        if (rightClickDownSignal > 0f)
-        {
-            stepsSinceLastRightClick = 0f; // 右クリックされたら0にリセット
-        }
-        else
-        {
-            stepsSinceLastRightClick += 1f; // 押されてなければ時間を進める
-        }
-    }
-
-    private void OnCollisionStay2D(Collision2D collision) => isGrounded = true;
-    private void OnCollisionExit2D(Collision2D collision) => isGrounded = false;
-
-    private void OnGUI()
-    {
-        if (feedbackTimer > 0f)
-        {
-            GUIStyle style = new GUIStyle();
-            style.fontSize = 30;
-            style.fontStyle = FontStyle.Bold;
-            style.normal.textColor = feedbackColor;
-
-            GUI.Label(new Rect(Screen.width / 2f - 100, 100, 300, 50), feedbackText, style);
-        }
-    }
+        if (feedbackTimer > 0f)
+        {
+            GUIStyle style = new GUIStyle();
+            style.fontSize = 30;
+            style.fontStyle = FontStyle.Bold;
+            style.normal.textColor = feedbackColor;
+            GUI.Label(new Rect(Screen.width / 2f - 100, 100, 300, 50), feedbackText, style);
+        }
+    }
 }
-
-これでいいの
