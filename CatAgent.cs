@@ -14,7 +14,7 @@ public class CatAgent : Agent
 
     [Header("Reward")]
     public float praiseReward = 1.0f;   // Z
-    public float scoldReward = -0.5f;   // X
+    public float scoldReward = -1.0f;   // X
 
     [Header("Jump")]
     public float jumpForce = 3f;
@@ -67,6 +67,11 @@ public class CatAgent : Agent
     private float rightDownSum = 0f;
     private float rightHoldSum = 0f;
     private const int HISTORY_SIZE = 50;
+
+    public float LeftTrace => leftCommandTimer / commandDuration;
+    public float RightTrace => rightCommandTimer / commandDuration;
+    public bool LeftHolding => leftHoldSignal > 0f;
+    public bool RightHolding => rightHoldSignal > 0f;
 
     // フィードバック表示
     private string feedbackText = "";
@@ -347,3 +352,4 @@ public class CatAgent : Agent
         }
     }
 }
+
