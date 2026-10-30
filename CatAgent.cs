@@ -68,15 +68,20 @@ public class CatAgent : Agent
     private float rightHoldSum = 0f;
     private const int HISTORY_SIZE = 50;
 
+    // フィードバック表示
+    private string feedbackText = "";
+    private float feedbackTimer = 0f;
+    private Color feedbackColor = Color.white;
+
+    // 可視化用（ClickFX / ObservationMonitor から読む）
     public float LeftTrace => leftCommandTimer / commandDuration;
     public float RightTrace => rightCommandTimer / commandDuration;
     public bool LeftHolding => leftHoldSignal > 0f;
     public bool RightHolding => rightHoldSignal > 0f;
 
-    // フィードバック表示
-    private string feedbackText = "";
-    private float feedbackTimer = 0f;
-    private Color feedbackColor = Color.white;
+    // 直近の決定で猫が受け取った観測値（観測モニター用）
+    public float[] DebugObs = new float[20];
+    private int obsIndex = 0;
 
     public override void Initialize()
     {
@@ -226,8 +231,17 @@ public class CatAgent : Agent
         if (sr != null) sr.color = Color.white;
     }
 
+    // 観測を1つ追加して、モニター用の配列にも記録する
+    private void Obs(VectorSensor sensor, float v)
+    {
+        sensor.AddObservation(v);
+        if (obsIndex < DebugObs.Length) DebugObs[obsIndex] = v;
+        obsIndex++;
+    }
+
     public override void CollectObservations(VectorSensor sensor)
     {
+        obsIndex = 0;
         Vector3 mousePos = Camera.main.ScreenToWorldPoint(Input.mousePosition);
 
         observedLeftClick = leftClickLatch;
@@ -236,43 +250,43 @@ public class CatAgent : Agent
         rightClickLatch = 0f;
 
         // 1-2: カーソルとの相対位置
-        sensor.AddObservation((mousePos.x - transform.position.x) / posScale);
-        sensor.AddObservation((mousePos.y - transform.position.y) / posScale);
+        Obs(sensor, (mousePos.x - transform.position.x) / posScale);
+        Obs(sensor, (mousePos.y - transform.position.y) / posScale);
 
         // 3-4: カーソル速度
-        sensor.AddObservation(Mathf.Clamp(mouseVelocity.x / velScale, -1f, 1f));
-        sensor.AddObservation(Mathf.Clamp(mouseVelocity.y / velScale, -1f, 1f));
+        Obs(sensor, Mathf.Clamp(mouseVelocity.x / velScale, -1f, 1f));
+        Obs(sensor, Mathf.Clamp(mouseVelocity.y / velScale, -1f, 1f));
 
         // 5-7: 自分の状態
-        sensor.AddObservation(rb.linearVelocity.x / 10f);
-        sensor.AddObservation(rb.linearVelocity.y / 10f);
-        sensor.AddObservation(isGrounded ? 1f : 0f);
+        Obs(sensor, rb.linearVelocity.x / 10f);
+        Obs(sensor, rb.linearVelocity.y / 10f);
+        Obs(sensor, isGrounded ? 1f : 0f);
 
         // 8-11: 現在のクリック・ホールド
-        sensor.AddObservation(observedLeftClick);
-        sensor.AddObservation(leftHoldSignal);
-        sensor.AddObservation(observedRightClick);
-        sensor.AddObservation(rightHoldSignal);
+        Obs(sensor, observedLeftClick);
+        Obs(sensor, leftHoldSignal);
+        Obs(sensor, observedRightClick);
+        Obs(sensor, rightHoldSignal);
 
         // 12-15: クリック傾向
-        sensor.AddObservation(leftDownSum / HISTORY_SIZE);
-        sensor.AddObservation(leftHoldSum / HISTORY_SIZE);
-        sensor.AddObservation(rightDownSum / HISTORY_SIZE);
-        sensor.AddObservation(rightHoldSum / HISTORY_SIZE);
+        Obs(sensor, leftDownSum / HISTORY_SIZE);
+        Obs(sensor, leftHoldSum / HISTORY_SIZE);
+        Obs(sensor, rightDownSum / HISTORY_SIZE);
+        Obs(sensor, rightHoldSum / HISTORY_SIZE);
 
         // 16-17: クリックの痕跡（クリック直後が1、commandDuration秒かけて0に減る）
-        sensor.AddObservation(leftCommandTimer / commandDuration);
-        sensor.AddObservation(rightCommandTimer / commandDuration);
+        Obs(sensor, leftCommandTimer / commandDuration);
+        Obs(sensor, rightCommandTimer / commandDuration);
 
         // 18: ジャンプ残り回数（0〜1）
         CanJumpByRate();
-        sensor.AddObservation((float)(maxJumpsInWindow - jumpTimes.Count) / maxJumpsInWindow);
+        Obs(sensor, (float)(maxJumpsInWindow - jumpTimes.Count) / maxJumpsInWindow);
 
         // 19: 最後のジャンプからの経過（0=直後, 1=jumpMemorySeconds以上前）
-        sensor.AddObservation(Mathf.Clamp01((Time.time - lastJumpTime) / jumpMemorySeconds));
+        Obs(sensor, Mathf.Clamp01((Time.time - lastJumpTime) / jumpMemorySeconds));
 
         // 20: 予備動作の進み具合（0=していない, 0.1〜1=しゃがみ中）
-        sensor.AddObservation(isWindingUp ? Mathf.Max(0.1f, 1f - windupTimer / windupDuration) : 0f);
+        Obs(sensor, isWindingUp ? Mathf.Max(0.1f, 1f - windupTimer / windupDuration) : 0f);
     }
 
     public override void WriteDiscreteActionMask(IDiscreteActionMask actionMask)
@@ -352,4 +366,3 @@ public class CatAgent : Agent
         }
     }
 }
-
