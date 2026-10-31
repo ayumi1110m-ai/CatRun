@@ -16,26 +16,49 @@ public class CatAgent : Agent
     public float praiseReward = 1.0f;   // Z
     public float scoldReward = -1.0f;   // X
 
+    [Header("Special action (ブランチ1: 0=しない, 1=ジャンプ, 2=パンチ)")]
+    public int jumpRate = 1;
+    public int punchRate = 2;
+    private int lastSpecial = 0;
+
     [Header("Jump")]
     public float jumpForce = 3f;
     public bool useVariableJumpPower = false; // trueにすると連続行動でジャンプ力が変わる（Continuous Actions を1に）
     public float jumpForceMin = 3f;
     public float jumpForceMax = 10f;
-    public int jumpRate = 1;                  // ブランチ1: 0=跳ばない, 1=跳ぶ
     public int maxJumpsInWindow = 3;          // 何回まで
     public float jumpWindowSeconds = 10f;     // 何秒の間に
     public float jumpMemorySeconds = 3f;      // 「最後のジャンプからの経過」を観測する長さ
     private Queue<float> jumpTimes = new Queue<float>();
     private float lastJumpTime = -999f;
-    private bool lastJumpInput = false;
+    private float pendingJumpForce = 0f;
     private bool isGrounded => IsGroundedNow();
 
-    [Header("Windup (跳ぶと決めてから実際に跳ぶまでの間)")]
-    public float windupDuration = 0.5f;
+    [Header("Punch")]
+    public int maxPunchesInWindow = 3;
+    public float punchWindowSeconds = 10f;
+    public float punchMemorySeconds = 3f;
+    public float punchReach = 0.9f;           // 猫の前方どれくらいの位置を殴るか（ワールド単位）
+    public float punchRadius = 0.6f;          // 当たり判定の半径
+    public float punchForce = 3f;             // 当てた物に与える力
+    public float punchVisualSeconds = 0.15f;  // 手が出ている時間
+    private Queue<float> punchTimes = new Queue<float>();
+    private float lastPunchTime = -999f;
+    private GameObject paw;
+    private float pawTimer = 0f;
+    private int facing = 1;                   // 1=右, -1=左
+
+    [Header("Windup (技を出すと決めてから実際に出るまでの間)")]
+    public float windupDuration = 0.5f;       // ジャンプ
+    public float punchWindupDuration = 0.4f;  // パンチ
     public Color windupColor = Color.yellow;
+    public Color punchWindupColor = new Color(1f, 0.45f, 0.45f);
+    private const int KindJump = 1;
+    private const int KindPunch = 2;
     private bool isWindingUp = false;
+    private int windupKind = 0;
     private float windupTimer = 0f;
-    private float pendingJumpForce = 0f;
+    private float windupTotal = 0.5f;
 
     [Header("Observation Scale")]
     public float posScale = 10f;
@@ -79,8 +102,8 @@ public class CatAgent : Agent
     public bool LeftHolding => leftHoldSignal > 0f;
     public bool RightHolding => rightHoldSignal > 0f;
 
-    // 直近の決定で猫が受け取った観測値（観測モニター用）
-    public float[] DebugObs = new float[20];
+    // 直近の決定で猫が受け取った観測値（観測モニター用。シーンには保存しない）
+    [System.NonSerialized] public float[] DebugObs = new float[25];
     private int obsIndex = 0;
 
     public override void Initialize()
@@ -88,6 +111,23 @@ public class CatAgent : Agent
         rb = GetComponent<Rigidbody2D>();
         col = GetComponent<Collider2D>();
         sr = GetComponent<SpriteRenderer>();
+        CreatePaw();
+    }
+
+    // パンチの手（小さな丸）を子オブジェクトとして用意する
+    private void CreatePaw()
+    {
+        if (sr == null) return;
+        paw = new GameObject("Paw");
+        paw.transform.SetParent(transform, false);
+        paw.transform.localScale = Vector3.one * 0.35f;
+        SpriteRenderer psr = paw.AddComponent<SpriteRenderer>();
+        psr.sprite = sr.sprite;
+        psr.sharedMaterial = sr.sharedMaterial;
+        psr.color = new Color(1f, 0.65f, 0.65f);
+        psr.sortingLayerID = sr.sortingLayerID;
+        psr.sortingOrder = sr.sortingOrder + 1;
+        paw.SetActive(false);
     }
 
     public override void OnEpisodeBegin()
@@ -97,10 +137,15 @@ public class CatAgent : Agent
         lastMousePos = Camera.main.ScreenToWorldPoint(Input.mousePosition);
         mouseVelocity = Vector2.zero;
 
-        lastJumpInput = false;
+        lastSpecial = 0;
         lastJumpTime = -999f;
+        lastPunchTime = -999f;
         jumpTimes.Clear();
-        ResetWindup();
+        punchTimes.Clear();
+        facing = 1;
+        pawTimer = 0f;
+        if (paw != null) paw.SetActive(false);
+        EndWindup();
 
         leftHoldTimer = 0f;
         rightHoldTimer = 0f;
@@ -133,13 +178,25 @@ public class CatAgent : Agent
 
     void Update()
     {
-        // 予備動作：時間が来たら跳ぶ（途中で止める操作はない）
+        // 予備動作：時間が来たら技が出る（途中で止める操作はない）
         if (isWindingUp)
         {
             windupTimer -= Time.deltaTime;
-            float progress = 1f - Mathf.Clamp01(windupTimer / windupDuration);
-            if (sr != null) sr.color = Color.Lerp(Color.white, windupColor, progress);
-            if (windupTimer <= 0f) ExecuteJump();
+            float progress = 1f - Mathf.Clamp01(windupTimer / windupTotal);
+            Color tint = (windupKind == KindPunch) ? punchWindupColor : windupColor;
+            if (sr != null) sr.color = Color.Lerp(Color.white, tint, progress);
+            if (windupTimer <= 0f)
+            {
+                if (windupKind == KindPunch) ExecutePunch();
+                else ExecuteJump();
+            }
+        }
+
+        // パンチの手を引っ込める
+        if (pawTimer > 0f)
+        {
+            pawTimer -= Time.deltaTime;
+            if (pawTimer <= 0f && paw != null) paw.SetActive(false);
         }
 
         if (feedbackTimer > 0f) feedbackTimer -= Time.deltaTime;
@@ -194,6 +251,14 @@ public class CatAgent : Agent
         return jumpTimes.Count < maxJumpsInWindow;
     }
 
+    // 古いパンチ記録を捨てて、今パンチできるか返す
+    private bool CanPunchByRate()
+    {
+        while (punchTimes.Count > 0 && Time.time - punchTimes.Peek() > punchWindowSeconds)
+            punchTimes.Dequeue();
+        return punchTimes.Count < maxPunchesInWindow;
+    }
+
     // 足元に地面があるか（壁に触れているだけでは接地にならない）
     private bool IsGroundedNow()
     {
@@ -208,11 +273,25 @@ public class CatAgent : Agent
         return false;
     }
 
-    private void ExecuteJump()
+    private void StartWindup(int kind, float duration)
+    {
+        isWindingUp = true;
+        windupKind = kind;
+        windupTotal = duration;
+        windupTimer = duration;
+    }
+
+    private void EndWindup()
     {
         isWindingUp = false;
+        windupKind = 0;
         windupTimer = 0f;
         if (sr != null) sr.color = Color.white;
+    }
+
+    private void ExecuteJump()
+    {
+        EndWindup();
         if (!isGrounded) return;
 
         Vector2 v = rb.linearVelocity;
@@ -224,11 +303,34 @@ public class CatAgent : Agent
         Debug.Log($"JUMP game={Time.time:F1}s real={Time.realtimeSinceStartup:F1}s");
     }
 
-    private void ResetWindup()
+    private void ExecutePunch()
     {
-        isWindingUp = false;
-        windupTimer = 0f;
-        if (sr != null) sr.color = Color.white;
+        EndWindup();
+
+        Vector2 origin = (Vector2)transform.position + new Vector2(facing * punchReach, 0f);
+        int hits = 0;
+        foreach (var h in Physics2D.OverlapCircleAll(origin, punchRadius))
+        {
+            if (h == col || h.isTrigger) continue;
+            Rigidbody2D target = h.attachedRigidbody;
+            if (target == null || target == rb) continue;
+            if (h.GetComponentInParent<Punchable>() == null) continue;   // Punchable を付けた物だけ殴れる
+
+            target.AddForce(new Vector2(facing, 0.3f).normalized * punchForce, ForceMode2D.Impulse);
+            hits++;
+        }
+
+        punchTimes.Enqueue(Time.time);
+        lastPunchTime = Time.time;
+
+        if (paw != null)
+        {
+            paw.transform.localPosition = new Vector3(facing * punchReach, 0f, 0f);
+            paw.SetActive(true);
+            pawTimer = punchVisualSeconds;
+        }
+
+        Debug.Log($"PUNCH hits={hits} game={Time.time:F1}s");
     }
 
     // 観測を1つ追加して、モニター用の配列にも記録する
@@ -286,21 +388,48 @@ public class CatAgent : Agent
         Obs(sensor, Mathf.Clamp01((Time.time - lastJumpTime) / jumpMemorySeconds));
 
         // 20: 予備動作の進み具合（0=していない, 0.1〜1=しゃがみ中）
-        Obs(sensor, isWindingUp ? Mathf.Max(0.1f, 1f - windupTimer / windupDuration) : 0f);
+        Obs(sensor, isWindingUp ? Mathf.Max(0.1f, 1f - windupTimer / windupTotal) : 0f);
+
+        // 21: 最後のパンチからの経過（0=直後, 1=punchMemorySeconds以上前）
+        Obs(sensor, Mathf.Clamp01((Time.time - lastPunchTime) / punchMemorySeconds));
+
+        // 22: 予備動作の種類（0=なし, 0.5=ジャンプ, 1=パンチ）
+        Obs(sensor, windupKind == KindPunch ? 1f : (windupKind == KindJump ? 0.5f : 0f));
+
+        // 23: 猫の向き（-1=左, 1=右）
+        Obs(sensor, facing);
+
+        // 24-25: いちばん近い Punchable の相対位置（なければ0）
+        Vector2 targetRel = Vector2.zero;
+        float best = float.MaxValue;
+        Vector2 me = transform.position;
+        foreach (var p in Punchable.All)
+        {
+            Vector2 d = (Vector2)p.transform.position - me;
+            float sq = d.sqrMagnitude;
+            if (sq < best)
+            {
+                best = sq;
+                targetRel = d / posScale;
+            }
+        }
+        Obs(sensor, Mathf.Clamp(targetRel.x, -1f, 1f));
+        Obs(sensor, Mathf.Clamp(targetRel.y, -1f, 1f));
     }
 
     public override void WriteDiscreteActionMask(IDiscreteActionMask actionMask)
     {
-        if (!isGrounded || isWindingUp || !CanJumpByRate())
-        {
+        if (isWindingUp || !isGrounded || !CanJumpByRate())
             actionMask.SetActionEnabled(1, jumpRate, false);
-        }
+
+        if (isWindingUp || !CanPunchByRate())
+            actionMask.SetActionEnabled(1, punchRate, false);
     }
 
     public override void OnActionReceived(ActionBuffers actions)
     {
-        int move = actions.DiscreteActions[0]; // 0:止まる, 1:左, 2:右
-        int jump = actions.DiscreteActions[1]; // jumpRate:跳ぶ
+        int move = actions.DiscreteActions[0];     // 0:止まる, 1:左, 2:右
+        int special = actions.DiscreteActions[1];  // 0:しない, jumpRate:ジャンプ, punchRate:パンチ
 
         // 履歴更新
         if (leftDownHistory.Count >= HISTORY_SIZE)
@@ -319,29 +448,34 @@ public class CatAgent : Agent
         rightHoldHistory.Enqueue(rightHoldSignal);
         rightHoldSum += rightHoldSignal;
 
-        // 横移動
+        // 横移動と向き
         Vector2 vel = rb.linearVelocity;
         if (move == 0) vel.x = 0;
-        else if (move == 1) vel.x = -moveSpeed;
-        else if (move == 2) vel.x = moveSpeed;
+        else if (move == 1) { vel.x = -moveSpeed; facing = -1; }
+        else if (move == 2) { vel.x = moveSpeed; facing = 1; }
 
-        // ジャンプ：跳ぶと決めたら予備動作に入る（接地中のみ・回数制限あり）
-        bool wantJump = (jump == jumpRate);
-        if (wantJump && !lastJumpInput && isGrounded && !isWindingUp && CanJumpByRate())
+        // 技：出すと決めたら予備動作に入る（同時には1つだけ）
+        if (special != 0 && special != lastSpecial && !isWindingUp)
         {
-            float force = jumpForce;
-            if (useVariableJumpPower && actions.ContinuousActions.Length > 0)
+            if (special == jumpRate && isGrounded && CanJumpByRate())
             {
-                float p = Mathf.Clamp01((actions.ContinuousActions[0] + 1f) * 0.5f);
-                force = Mathf.Lerp(jumpForceMin, jumpForceMax, p);
+                float force = jumpForce;
+                if (useVariableJumpPower && actions.ContinuousActions.Length > 0)
+                {
+                    float p = Mathf.Clamp01((actions.ContinuousActions[0] + 1f) * 0.5f);
+                    force = Mathf.Lerp(jumpForceMin, jumpForceMax, p);
+                }
+                pendingJumpForce = force;
+                StartWindup(KindJump, windupDuration);
             }
-            pendingJumpForce = force;
-            isWindingUp = true;
-            windupTimer = windupDuration;
+            else if (special == punchRate && CanPunchByRate())
+            {
+                StartWindup(KindPunch, punchWindupDuration);
+            }
         }
-        lastJumpInput = wantJump;
+        lastSpecial = special;
 
-        if (isWindingUp) vel.x = 0f;   // しゃがみ中は動かない
+        if (isWindingUp) vel.x = 0f;   // 予備動作中は動かない
         rb.linearVelocity = vel;
     }
 
