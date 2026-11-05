@@ -2,13 +2,14 @@ using System.Collections.Generic;
 using System.IO;
 using UnityEngine;
 
-// 猫本体。ML-Agents は使わず、ゲーム内の HumanFeedbackBrain が、Z/X のフィードバックだけで学ぶ。
+// 猫本体。ML-Agents は使わず、ゲーム内の2つの脳（移動の脳・特技の脳）が、Z/X のフィードバックだけで学ぶ。
 public class CatAgent : MonoBehaviour
 {
     private Rigidbody2D rb;
     private Collider2D col;
     private SpriteRenderer sr;
-    private HumanFeedbackBrain brain;
+    private HumanFeedbackBrain moveBrain;      // 移動の脳
+    private HumanFeedbackBrain specialBrain;   // 特技（ジャンプ・パンチ）の脳
 
     private const int ObsCount = 25;
     private const int JumpIndex = 1;    // 特技: 1=ジャンプ
@@ -26,6 +27,10 @@ public class CatAgent : MonoBehaviour
     public string saveName = "cat1";
     public bool autoSave = true;
     public float autoSaveSeconds = 30f;
+
+    [Header("Speed (→で一段階アップ、←で一段階ダウン)")]
+    public float[] speedLevels = { 1f, 2f, 3f, 5f, 10f, 20f };
+    private int speedIndex = 0;
 
     [Header("Feedback")]
     public float praiseReward = 1.0f;        // Z
@@ -114,7 +119,8 @@ public class CatAgent : MonoBehaviour
     public float RightTrace => rightCommandTimer / commandDuration;
     public bool LeftHolding => leftHoldSignal > 0f;
     public bool RightHolding => rightHoldSignal > 0f;
-    public HumanFeedbackBrain Brain => brain;
+    public HumanFeedbackBrain MoveBrain => moveBrain;
+    public HumanFeedbackBrain SpecialBrain => specialBrain;
 
     // 直近の決定で猫が受け取った観測値（脳への入力にも使う。シーンには保存しない）
     [System.NonSerialized] public float[] DebugObs = new float[ObsCount];
@@ -131,10 +137,16 @@ public class CatAgent : MonoBehaviour
         col = GetComponent<Collider2D>();
         sr = GetComponent<SpriteRenderer>();
         CreatePaw();
+        SetSpeedLevel(0);
 
         int seed = randomSeed != 0 ? randomSeed : System.Environment.TickCount;
-        brain = new HumanFeedbackBrain(ObsCount, hiddenSize, seed, specialNoneBias);
-        brain.learningRate = learningRate;
+        // 隠れ層まで完全に分けた2つの脳。どちらも全部の入力を見られる（どの入力も指示に使えるように）
+        moveBrain = new HumanFeedbackBrain(ObsCount, hiddenSize, seed, 8f);
+        moveBrain.kernelSigma = 0.4f;
+        specialBrain = new HumanFeedbackBrain(ObsCount, hiddenSize, seed + 100, specialNoneBias);
+        specialBrain.kernelSigma = 0.3f;
+        moveBrain.learningRate = learningRate;
+        specialBrain.learningRate = learningRate;
         LoadBrain();
     }
 
@@ -234,17 +246,17 @@ public class CatAgent : MonoBehaviour
         if (Input.GetKeyDown(KeyCode.X))
             GiveFeedback(scoldReward * mult, strong ? "強く叱った！" : "叱った！", Color.red);
 
-        // 行動を決める（一定間隔）
-        decisionTimer += Time.deltaTime;
-        if (decisionTimer >= decisionInterval)
-        {
-            decisionTimer -= decisionInterval;
-            if (decisionTimer > decisionInterval) decisionTimer = 0f;
-            Decide();
-        }
+        // 速度の切り替え（→で一段階アップ、←で一段階ダウン）
+        if (Input.GetKeyDown(KeyCode.RightArrow)) SetSpeedLevel(speedIndex + 1);
+        if (Input.GetKeyDown(KeyCode.LeftArrow)) SetSpeedLevel(speedIndex - 1);
+
+        // Inspector の学習率を、再生中も反映する（いろいろ試せるように）
+        moveBrain.learningRate = learningRate;
+        specialBrain.learningRate = learningRate;
 
         // 押された評価を、あとで復習する
-        brain.BackgroundReplay(Time.unscaledTime);
+        moveBrain.BackgroundReplay(Time.unscaledTime);
+        specialBrain.BackgroundReplay(Time.unscaledTime);
 
         if (autoSave)
         {
@@ -257,10 +269,30 @@ public class CatAgent : MonoBehaviour
         }
     }
 
+    // 行動は物理の1ステップごとに数えて決める（倍速でも、ゲーム内の時間あたりの決定回数が変わらない）
+    void FixedUpdate()
+    {
+        decisionTimer += Time.fixedDeltaTime;
+        if (decisionTimer >= decisionInterval)
+        {
+            decisionTimer -= decisionInterval;
+            Decide();
+        }
+    }
+
+    private void SetSpeedLevel(int index)
+    {
+        speedIndex = Mathf.Clamp(index, 0, speedLevels.Length - 1);
+        Time.timeScale = speedLevels[speedIndex];
+    }
+
     private void GiveFeedback(float value, string label, Color color)
     {
         // 人間の反応の遅れは実時間なので、倍速でも合うように実時間で渡す
-        brain.Feedback(value, Time.unscaledTime);
+        // 直近に技を出していれば特技の脳へ、出していなければ移動の脳へ渡す
+        float now = Time.unscaledTime;
+        if (specialBrain.HasSpecialEvent(now)) specialBrain.Feedback(value, now);
+        else moveBrain.Feedback(value, now);
         ShowFeedback(label + " (" + (value > 0 ? "+" : "") + value.ToString("0.#") + ")", color);
     }
 
@@ -283,8 +315,10 @@ public class CatAgent : MonoBehaviour
         bool jumpOk = isGrounded && !isWindingUp && CanJumpByRate();
         bool punchOk = !isWindingUp && CanPunchByRate();
 
-        int move, special;
-        brain.Decide(DebugObs, jumpOk, punchOk, ArousalLevel, Time.unscaledTime, out move, out special);
+        float now = Time.unscaledTime;
+        int move, special, ignoredSpecial, ignoredMove;
+        moveBrain.Decide(DebugObs, false, false, 0f, now, out move, out ignoredSpecial);
+        specialBrain.Decide(DebugObs, jumpOk, punchOk, ArousalLevel, now, out ignoredMove, out special);
         ApplyActions(move, special);
     }
 
@@ -512,11 +546,12 @@ public class CatAgent : MonoBehaviour
 
     public void SaveBrain()
     {
-        if (brain == null) return;
+        if (moveBrain == null || specialBrain == null) return;
         CatBrainSave data = new CatBrainSave();
         data.obs = ObsCount;
         data.hidden = hiddenSize;
-        data.weights = brain.GetWeights();
+        data.weights = moveBrain.GetWeights();
+        data.weightsSpecial = specialBrain.GetWeights();
         File.WriteAllText(SavePath, JsonUtility.ToJson(data));
     }
 
@@ -525,12 +560,21 @@ public class CatAgent : MonoBehaviour
         if (!File.Exists(SavePath)) return;
         CatBrainSave data = JsonUtility.FromJson<CatBrainSave>(File.ReadAllText(SavePath));
         if (data == null || data.obs != ObsCount || data.hidden != hiddenSize) return;
-        if (brain.SetWeights(data.weights)) Debug.Log("猫の脳を読み込みました: " + SavePath);
+        if (data.weightsSpecial == null) return;
+        bool okMove = moveBrain.SetWeights(data.weights);
+        bool okSpecial = specialBrain.SetWeights(data.weightsSpecial);
+        if (okMove && okSpecial) Debug.Log("猫の脳を読み込みました: " + SavePath);
     }
 
     void OnApplicationQuit()
     {
         if (autoSave) SaveBrain();
+        Time.timeScale = 1f;
+    }
+
+    void OnDestroy()
+    {
+        Time.timeScale = 1f;
     }
 
     private void OnGUI()
@@ -541,6 +585,8 @@ public class CatAgent : MonoBehaviour
         CanJumpByRate();
         GUI.Label(new Rect(16, 16, 620, 40),
             "Z:褒める  X:叱る  (Shiftで強く)  ジャンプ残り:" + (maxJumpsInWindow - jumpTimes.Count), hint);
+        GUI.Label(new Rect(16, 40, 620, 40),
+            "速度: x" + speedLevels[speedIndex] + "  (←/→で変更)", hint);
 
         if (feedbackTimer > 0f)
         {
@@ -559,5 +605,6 @@ public class CatBrainSave
 {
     public int obs;
     public int hidden;
-    public float[] weights;
+    public float[] weights;          // 移動の脳
+    public float[] weightsSpecial;   // 特技の脳
 }
