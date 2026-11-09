@@ -75,6 +75,7 @@ public class CatAgent : MonoBehaviour
     [Header("Observation Scale")]
     public float posScale = 10f;
     public float velScale = 20f;
+    public float moveInputBoost = 10f;   // 移動の脳にだけ、カーソル・殴れる物の相対位置を大きく見せる（10倍 = 元のワールド座標の大きさ）
 
     private Vector3 lastMousePos;
     private Vector2 mouseVelocity;
@@ -124,6 +125,7 @@ public class CatAgent : MonoBehaviour
 
     // 直近の決定で猫が受け取った観測値（脳への入力にも使う。シーンには保存しない）
     [System.NonSerialized] public float[] DebugObs = new float[ObsCount];
+    private readonly float[] moveObs = new float[ObsCount];
     private int obsIndex = 0;
 
     private float ArousalLevel
@@ -317,7 +319,13 @@ public class CatAgent : MonoBehaviour
 
         float now = Time.unscaledTime;
         int move, special, ignoredSpecial, ignoredMove;
-        moveBrain.Decide(DebugObs, false, false, 0f, now, out move, out ignoredSpecial);
+        // 移動の脳には、位置の入力を大きくして渡す（追従の手がかりが強く効き、少ない Z/X で覚えられる）
+        System.Array.Copy(DebugObs, moveObs, ObsCount);
+        moveObs[0] *= moveInputBoost;    // カーソルとの相対位置 x
+        moveObs[1] *= moveInputBoost;    // カーソルとの相対位置 y
+        moveObs[23] *= moveInputBoost;   // いちばん近い殴れる物 x
+        moveObs[24] *= moveInputBoost;   // いちばん近い殴れる物 y
+        moveBrain.Decide(moveObs, false, false, 0f, now, out move, out ignoredSpecial);
         specialBrain.Decide(DebugObs, jumpOk, punchOk, ArousalLevel, now, out ignoredMove, out special);
         ApplyActions(move, special);
     }

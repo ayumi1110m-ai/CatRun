@@ -58,7 +58,7 @@ public class HumanFeedbackBrain
         public float t;
     }
 
-    private const int StepCap = 80;
+    private const int StepCap = 512;   // 倍速(x20)でも、約2秒ぶんの決定を覚えておける数
     private readonly Step[] steps = new Step[StepCap];
     private int stepHead = 0;
     private int stepCount = 0;
@@ -265,6 +265,20 @@ public class HumanFeedbackBrain
             Labeled l = replay[rng.Next(replayCount)];
             UpdateSample(l.x, l.head, l.action, l.coef, l.jumpOk, l.punchOk, learningRate * replayLrScale);
         }
+    }
+
+    // 直近 maxDelay 秒のあいだに、技（ジャンプ・パンチ）を出していたか
+    public bool HasSpecialEvent(float now)
+    {
+        for (int i = 0; i < stepCount; i++)
+        {
+            int idx = (stepHead - 1 - i + StepCap) % StepCap;
+            float age = now - steps[idx].t;
+            if (age < 0f) continue;
+            if (age > maxDelay) break;
+            if (steps[idx].sp != 0) return true;
+        }
+        return false;
     }
 
     // 短期の記憶だけ消す（重みは残す）
