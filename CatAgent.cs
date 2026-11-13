@@ -585,6 +585,18 @@ public class CatAgent : MonoBehaviour
         Time.timeScale = 1f;
     }
 
+    // ステージの都合でスタート位置に戻す（脳と学習はそのまま残る）
+    public void Respawn(Vector3 position)
+    {
+        transform.position = position;
+        rb.linearVelocity = Vector2.zero;
+        rb.angularVelocity = 0f;
+        EndWindup();
+        decisionTimer = 0f;
+        if (paw != null) paw.SetActive(false);
+        pawTimer = 0f;
+    }
+
     private void OnGUI()
     {
         GUIStyle hint = new GUIStyle();
