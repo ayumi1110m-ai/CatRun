@@ -23,6 +23,8 @@ public class CatAgent : MonoBehaviour
     public float specialNoneBias = 5f;       // 大きいほど、勝手に技を出さない
     public float decisionInterval = 0.1f;    // 何秒ごとに行動を決めるか（ゲーム内時間）
     public float arousalSeconds = 1.5f;      // 入力の直後、何秒間「何かを試しやすく」するか
+    public float arousalExplore = 0.15f;     // 入力の直後に、気まぐれで技を試す確率（下げると、指示以外の入力に反応しにくくなる）
+    public float baseExplore = 0.01f;        // 普段の気まぐれで技を試す確率
     public int randomSeed = 0;               // 0 = 毎回ランダム
     public string saveName = "cat1";
     public bool autoSave = true;
@@ -31,6 +33,9 @@ public class CatAgent : MonoBehaviour
     [Header("Speed (→で一段階アップ、←で一段階ダウン)")]
     public float[] speedLevels = { 1f, 2f, 3f, 5f, 10f, 20f };
     private int speedIndex = 0;
+
+    [Header("Visuals")]
+    public bool showPlaceholder = true;      // 仮の丸と手を表示する（アニメーションを使うときは切る）
 
     [Header("Feedback")]
     public float praiseReward = 1.0f;        // Z
@@ -120,6 +125,18 @@ public class CatAgent : MonoBehaviour
     public float RightTrace => rightCommandTimer / commandDuration;
     public bool LeftHolding => leftHoldSignal > 0f;
     public bool RightHolding => rightHoldSignal > 0f;
+    // アニメーション連携用（読み取り専用）
+    public int Facing => facing;                                // 1=右, -1=左
+    public bool IsWindingUp => isWindingUp;
+    public int WindupKindId => windupKind;                      // 0=なし, 1=ジャンプ, 2=パンチ
+    public float WindupTotalSeconds => windupTotal;
+    public bool Grounded => isGrounded;
+    public bool PunchActive => pawTimer > 0f || (isWindingUp && windupKind == KindPunch);
+    public Vector2 Velocity => rb != null ? rb.linearVelocity : Vector2.zero;
+    public event System.Action<int> WindupStarted;              // 技の予備動作が始まった（引数は技の種類）
+    public event System.Action JumpPerformed;                   // ジャンプで地面を蹴った
+    public event System.Action PunchPerformed;                  // パンチを繰り出した
+
     public HumanFeedbackBrain MoveBrain => moveBrain;
     public HumanFeedbackBrain SpecialBrain => specialBrain;
 
@@ -138,6 +155,7 @@ public class CatAgent : MonoBehaviour
         rb = GetComponent<Rigidbody2D>();
         col = GetComponent<Collider2D>();
         sr = GetComponent<SpriteRenderer>();
+        if (!showPlaceholder && sr != null) sr.enabled = false;
         CreatePaw();
         SetSpeedLevel(0);
 
@@ -168,7 +186,7 @@ public class CatAgent : MonoBehaviour
     // パンチの手（小さな丸）を子オブジェクトとして用意する
     private void CreatePaw()
     {
-        if (sr == null) return;
+        if (sr == null || !showPlaceholder) return;
         paw = new GameObject("Paw");
         paw.transform.SetParent(transform, false);
         paw.transform.localScale = Vector3.one * 0.35f;
@@ -255,6 +273,8 @@ public class CatAgent : MonoBehaviour
         // Inspector の学習率を、再生中も反映する（いろいろ試せるように）
         moveBrain.learningRate = learningRate;
         specialBrain.learningRate = learningRate;
+        specialBrain.epsSpecialMax = arousalExplore;
+        specialBrain.epsSpecialBase = baseExplore;
 
         // 押された評価を、あとで復習する
         moveBrain.BackgroundReplay(Time.unscaledTime);
@@ -490,6 +510,7 @@ public class CatAgent : MonoBehaviour
         windupKind = kind;
         windupTotal = duration;
         windupTimer = duration;
+        if (WindupStarted != null) WindupStarted(kind);
     }
 
     private void EndWindup()
@@ -511,6 +532,7 @@ public class CatAgent : MonoBehaviour
 
         jumpTimes.Enqueue(Time.time);
         lastJumpTime = Time.time;
+        if (JumpPerformed != null) JumpPerformed();
         Debug.Log($"JUMP game={Time.time:F1}s real={Time.realtimeSinceStartup:F1}s");
     }
 
@@ -533,6 +555,7 @@ public class CatAgent : MonoBehaviour
 
         punchTimes.Enqueue(Time.time);
         lastPunchTime = Time.time;
+        if (PunchPerformed != null) PunchPerformed();
 
         if (paw != null)
         {
