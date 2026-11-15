@@ -35,6 +35,7 @@ public class CatAnimator : MonoBehaviour
     private string current = "";
     private float idleTimer = 0f;
     private float holdUntil = 0f;
+    private float lastSwitchTime = 0f;
 
     void Awake()
     {
@@ -106,8 +107,15 @@ public class CatAnimator : MonoBehaviour
             return jumpState;
         }
 
-        if (Time.time < holdUntil) { idleTimer = 0f; return punchState; }
-        if (cat.PunchActive) { idleTimer = 0f; return punchState; }
+        // 硬直中は、そのままパンチのアニメ
+        if (cat.IsRecovering) { idleTimer = 0f; return punchState; }
+
+        // パンチは、アニメが最後まで再生されるまで続ける（途中で歩き・座りに切り替えない）
+        if (Time.time < holdUntil || cat.PunchActive || ClipStillPlaying(punchState))
+        {
+            idleTimer = 0f;
+            return punchState;
+        }
         if (!cat.Grounded) { idleTimer = 0f; return jumpState; }
 
         if (Mathf.Abs(cat.Velocity.x) > walkSpeedThreshold)
@@ -121,11 +129,24 @@ public class CatAnimator : MonoBehaviour
         return string.IsNullOrEmpty(idleState) ? sitState : idleState;
     }
 
+    // そのステートのクリップが、まだ最後まで再生されていないか
+    private bool ClipStillPlaying(string state)
+    {
+        if (current != state || string.IsNullOrEmpty(state)) return false;
+        if (Time.time - lastSwitchTime < 0.1f) return true;   // 切り替えた直後は、まだ再生中とみなす
+
+        AnimatorStateInfo info = animator.IsInTransition(0)
+            ? animator.GetNextAnimatorStateInfo(0)
+            : animator.GetCurrentAnimatorStateInfo(0);
+        return info.IsName(state) && info.normalizedTime < 1f;
+    }
+
     private void Play(string state, bool restart)
     {
         if (string.IsNullOrEmpty(state)) return;
         if (!restart && state == current) return;
         current = state;
+        lastSwitchTime = Time.time;
         animator.CrossFadeInFixedTime(state, crossFade, 0, 0f);
     }
 }

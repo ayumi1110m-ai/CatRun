@@ -59,6 +59,9 @@ public class CatAgent : MonoBehaviour
     public float punchRadius = 0.6f;
     public float punchForce = 3f;
     public float punchVisualSeconds = 0.15f;
+    public float punchRecoverySeconds = 0.3f;   // パンチのあとの硬直時間（クリップの長さ − 当たる瞬間 に合わせる）
+    private bool isRecovering = false;         // 技のあとの硬直中
+    private float recoveryTimer = 0f;
     private Queue<float> punchTimes = new Queue<float>();
     private float lastPunchTime = -999f;
     private GameObject paw;
@@ -128,6 +131,7 @@ public class CatAgent : MonoBehaviour
     // アニメーション連携用（読み取り専用）
     public int Facing => facing;                                // 1=右, -1=左
     public bool IsWindingUp => isWindingUp;
+    public bool IsRecovering => isRecovering;
     public int WindupKindId => windupKind;                      // 0=なし, 1=ジャンプ, 2=パンチ
     public float WindupTotalSeconds => windupTotal;
     public bool Grounded => isGrounded;
@@ -213,6 +217,13 @@ public class CatAgent : MonoBehaviour
                 if (windupKind == KindPunch) ExecutePunch();
                 else ExecuteJump();
             }
+        }
+
+        // 硬直（技のあとの動けない時間）
+        if (isRecovering)
+        {
+            recoveryTimer -= Time.deltaTime;
+            if (recoveryTimer <= 0f) isRecovering = false;
         }
 
         if (pawTimer > 0f)
@@ -334,8 +345,8 @@ public class CatAgent : MonoBehaviour
         CollectObservations();
         UpdateHistories();
 
-        bool jumpOk = isGrounded && !isWindingUp && CanJumpByRate();
-        bool punchOk = !isWindingUp && CanPunchByRate();
+        bool jumpOk = isGrounded && !isWindingUp && !isRecovering && CanJumpByRate();
+        bool punchOk = !isWindingUp && !isRecovering && CanPunchByRate();
 
         float now = Time.unscaledTime;
         int move, special, ignoredSpecial, ignoredMove;
@@ -461,7 +472,7 @@ public class CatAgent : MonoBehaviour
         else vel.x = 0f;
 
         // 技：出すと決めたら予備動作に入る（同時には1つだけ）
-        if (special != 0 && !isWindingUp)
+        if (special != 0 && !isWindingUp && !isRecovering)
         {
             if (special == JumpIndex && isGrounded && CanJumpByRate())
                 StartWindup(KindJump, windupDuration);
@@ -469,7 +480,7 @@ public class CatAgent : MonoBehaviour
                 StartWindup(KindPunch, punchWindupDuration);
         }
 
-        if (isWindingUp) vel.x = 0f;   // 予備動作中は動かない
+        if (isWindingUp || isRecovering) vel.x = 0f;   // 予備動作中と硬直中は動かない
         rb.linearVelocity = vel;
     }
 
@@ -557,6 +568,12 @@ public class CatAgent : MonoBehaviour
         lastPunchTime = Time.time;
         if (PunchPerformed != null) PunchPerformed();
 
+        if (punchRecoverySeconds > 0f)
+        {
+            isRecovering = true;
+            recoveryTimer = punchRecoverySeconds;
+        }
+
         if (paw != null)
         {
             paw.transform.localPosition = new Vector3(facing * punchReach, 0f, 0f);
@@ -615,6 +632,8 @@ public class CatAgent : MonoBehaviour
         rb.linearVelocity = Vector2.zero;
         rb.angularVelocity = 0f;
         EndWindup();
+        isRecovering = false;
+        recoveryTimer = 0f;
         decisionTimer = 0f;
         if (paw != null) paw.SetActive(false);
         pawTimer = 0f;
