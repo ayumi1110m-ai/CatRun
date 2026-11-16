@@ -16,6 +16,7 @@ public class CatAgent : MonoBehaviour
     private const int PunchIndex = 2;   // 特技: 2=パンチ
 
     public float moveSpeed = 2f;
+    public float turnSeconds = 0.25f;        // 向きを変えるとき、立ち止まって振り向く時間（0 なら、すぐ向きを変える）
 
     [Header("Learning (人間のフィードバックで学ぶ脳)")]
     public int hiddenSize = 48;
@@ -62,6 +63,9 @@ public class CatAgent : MonoBehaviour
     public float punchRecoverySeconds = 0.3f;   // パンチのあとの硬直時間（クリップの長さ − 当たる瞬間 に合わせる）
     private bool isRecovering = false;         // 技のあとの硬直中
     private float recoveryTimer = 0f;
+    private bool isTurning = false;            // 振り向き中（立ち止まって向きを変える）
+    private float turnTimer = 0f;
+    private int turnFromFacing = 1;
     private Queue<float> punchTimes = new Queue<float>();
     private float lastPunchTime = -999f;
     private GameObject paw;
@@ -132,6 +136,9 @@ public class CatAgent : MonoBehaviour
     public int Facing => facing;                                // 1=右, -1=左
     public bool IsWindingUp => isWindingUp;
     public bool IsRecovering => isRecovering;
+    public bool IsTurning => isTurning;
+    public int TurnFromFacing => turnFromFacing;               // 振り向く前の向き
+    public float TurnProgress => turnSeconds > 0f ? Mathf.Clamp01(1f - turnTimer / turnSeconds) : 1f;
     public int WindupKindId => windupKind;                      // 0=なし, 1=ジャンプ, 2=パンチ
     public float WindupTotalSeconds => windupTotal;
     public bool Grounded => isGrounded;
@@ -217,6 +224,13 @@ public class CatAgent : MonoBehaviour
                 if (windupKind == KindPunch) ExecutePunch();
                 else ExecuteJump();
             }
+        }
+
+        // 振り向き
+        if (isTurning)
+        {
+            turnTimer -= Time.deltaTime;
+            if (turnTimer <= 0f) isTurning = false;
         }
 
         // 硬直（技のあとの動けない時間）
@@ -345,8 +359,8 @@ public class CatAgent : MonoBehaviour
         CollectObservations();
         UpdateHistories();
 
-        bool jumpOk = isGrounded && !isWindingUp && !isRecovering && CanJumpByRate();
-        bool punchOk = !isWindingUp && !isRecovering && CanPunchByRate();
+        bool jumpOk = isGrounded && !isWindingUp && !isRecovering && !isTurning && CanJumpByRate();
+        bool punchOk = !isWindingUp && !isRecovering && !isTurning && CanPunchByRate();
 
         float now = Time.unscaledTime;
         int move, special, ignoredSpecial, ignoredMove;
@@ -467,12 +481,28 @@ public class CatAgent : MonoBehaviour
     {
         // 横移動と向き
         Vector2 vel = rb.linearVelocity;
-        if (move == 1) { vel.x = -moveSpeed; facing = -1; }
-        else if (move == 2) { vel.x = moveSpeed; facing = 1; }
+        int desired = (move == 1) ? -1 : (move == 2 ? 1 : facing);
+        if (isTurning) desired = facing;   // 振り向いている間は、向きの指示を受け付けない
+
+        if (desired != facing && turnSeconds > 0f && isGrounded && !isWindingUp && !isRecovering)
+        {
+            // 地上で逆向きに行こうとしたら、立ち止まって振り向く
+            isTurning = true;
+            turnTimer = turnSeconds;
+            turnFromFacing = facing;
+            facing = desired;
+        }
+        else if (desired != facing)
+        {
+            facing = desired;   // 空中などでは、すぐ向きを変える
+        }
+
+        if (move == 1) vel.x = -moveSpeed;
+        else if (move == 2) vel.x = moveSpeed;
         else vel.x = 0f;
 
         // 技：出すと決めたら予備動作に入る（同時には1つだけ）
-        if (special != 0 && !isWindingUp && !isRecovering)
+        if (special != 0 && !isWindingUp && !isRecovering && !isTurning)
         {
             if (special == JumpIndex && isGrounded && CanJumpByRate())
                 StartWindup(KindJump, windupDuration);
@@ -480,7 +510,7 @@ public class CatAgent : MonoBehaviour
                 StartWindup(KindPunch, punchWindupDuration);
         }
 
-        if (isWindingUp || isRecovering) vel.x = 0f;   // 予備動作中と硬直中は動かない
+        if (isWindingUp || isRecovering || isTurning) vel.x = 0f;   // 予備動作中・硬直中・振り向き中は動かない
         rb.linearVelocity = vel;
     }
 
@@ -634,6 +664,8 @@ public class CatAgent : MonoBehaviour
         EndWindup();
         isRecovering = false;
         recoveryTimer = 0f;
+        isTurning = false;
+        turnTimer = 0f;
         decisionTimer = 0f;
         if (paw != null) paw.SetActive(false);
         pawTimer = 0f;

@@ -28,6 +28,13 @@ public class CatAnimator : MonoBehaviour
     public float sitAfterSeconds = 3f;      // これだけ止まっていたら「座る」
     public float punchMinSeconds = 0.6f;    // パンチのアニメを、最低これだけ見せる
 
+    [Header("振り向き（斜め・正面のイラストを使う）")]
+    public SpriteRenderer diagonalSprite;   // 斜めのイラスト（Visual の子。普段は非表示になる）
+    public SpriteRenderer frontSprite;      // 正面のイラスト（Visual の子。普段は非表示になる）
+    public bool diagonalFacesRight = true;  // 斜めのイラストが、右向きなら true
+    [Range(0f, 1f)] public float frontStart = 0.33f;   // 振り向きの何割から正面にするか
+    [Range(0f, 1f)] public float frontEnd = 0.67f;     // 振り向きの何割まで正面にするか
+
     [Header("タイミング合わせ（0なら合わせない）")]
     public float jumpTakeoffTime = 0f;      // ジャンプのクリップで、地面を蹴る瞬間の秒数
     public float punchHitTime = 0f;         // パンチのクリップで、手が当たる瞬間の秒数
@@ -36,12 +43,34 @@ public class CatAnimator : MonoBehaviour
     private float idleTimer = 0f;
     private float holdUntil = 0f;
     private float lastSwitchTime = 0f;
+    private SpriteRenderer[] rigRenderers = new SpriteRenderer[0];
+    private bool[] rigInitialEnabled = new bool[0];
+    private bool turnShown = false;
 
     void Awake()
     {
         if (animator == null) animator = GetComponentInChildren<Animator>();
         if (cat == null) cat = GetComponentInParent<CatAgent>();
         if (animator != null) animator.applyRootMotion = false;
+        SetupTurnSprites();
+    }
+
+    // 振り向き用の絵以外の、普段の見た目（ボーンアニメの各パーツ）を集めておく
+    private void SetupTurnSprites()
+    {
+        Transform root = visualRoot != null ? visualRoot : transform;
+        var list = new System.Collections.Generic.List<SpriteRenderer>();
+        foreach (SpriteRenderer r in root.GetComponentsInChildren<SpriteRenderer>(true))
+        {
+            if (r == diagonalSprite || r == frontSprite) continue;
+            list.Add(r);
+        }
+        rigRenderers = list.ToArray();
+        rigInitialEnabled = new bool[rigRenderers.Length];
+        for (int i = 0; i < rigRenderers.Length; i++) rigInitialEnabled[i] = rigRenderers[i].enabled;
+
+        if (diagonalSprite != null) diagonalSprite.enabled = false;
+        if (frontSprite != null) frontSprite.enabled = false;
     }
 
     void OnEnable()
@@ -78,6 +107,14 @@ public class CatAnimator : MonoBehaviour
     {
         if (cat == null || animator == null) return;
 
+        // 振り向き中は、斜め→正面→斜め のイラストに切り替える
+        if (cat.IsTurning && diagonalSprite != null && frontSprite != null)
+        {
+            ShowTurn();
+            return;
+        }
+        if (turnShown) EndTurn();
+
         // 向き
         Transform t = visualRoot != null ? visualRoot : transform;
         float sign = ((cat.Facing >= 0) == spriteFacesRight) ? 1f : -1f;
@@ -95,6 +132,37 @@ public class CatAnimator : MonoBehaviour
         animator.speed = speed;
 
         Play(ChooseState(), false);
+    }
+
+    private void ShowTurn()
+    {
+        float p = cat.TurnProgress;
+        bool front = p >= frontStart && p < frontEnd;
+        int dir = p < frontStart ? cat.TurnFromFacing : cat.Facing;   // 前半は振り向く前の向き、後半は新しい向き
+
+        Transform t = visualRoot != null ? visualRoot : transform;
+        float sign = ((dir >= 0) == diagonalFacesRight) ? 1f : -1f;
+        Vector3 s = t.localScale;
+        s.x = Mathf.Abs(s.x) * sign;
+        t.localScale = s;
+
+        if (!turnShown)
+        {
+            turnShown = true;
+            for (int i = 0; i < rigRenderers.Length; i++) rigRenderers[i].enabled = false;
+        }
+        diagonalSprite.enabled = !front;
+        frontSprite.enabled = front;
+        animator.speed = 1f;
+    }
+
+    private void EndTurn()
+    {
+        turnShown = false;
+        for (int i = 0; i < rigRenderers.Length; i++) rigRenderers[i].enabled = rigInitialEnabled[i];
+        if (diagonalSprite != null) diagonalSprite.enabled = false;
+        if (frontSprite != null) frontSprite.enabled = false;
+        current = "";   // 振り向きのあと、今の状態のアニメを選び直す
     }
 
     private string ChooseState()
