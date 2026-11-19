@@ -23,9 +23,9 @@ public class CatAgent : MonoBehaviour
     public float learningRate = 0.04f;
     public float specialNoneBias = 5f;       // 大きいほど、勝手に技を出さない
     public float decisionInterval = 0.1f;    // 何秒ごとに行動を決めるか（ゲーム内時間）
-    public float arousalSeconds = 1.5f;      // 入力の直後、何秒間「何かを試しやすく」するか
-    public float arousalExplore = 0.15f;     // 入力の直後に、気まぐれで技を試す確率（下げると、指示以外の入力に反応しにくくなる）
-    public float baseExplore = 0.01f;        // 普段の気まぐれで技を試す確率
+    public float baseExplore = 0f;           // 入力とは無関係に、気まぐれで技を試す確率（0 = なし。猫が自分の判断だけで技を出す）
+    public float explorePower = 3f;          // baseExplore を使うとき、叱られた状況で試す回数をどれだけ減らすか
+    public float specialFeedbackWindow = 3.5f;   // 技を出してから、Z/X が届いても技への評価として扱う秒数
     public int randomSeed = 0;               // 0 = 毎回ランダム
     public string saveName = "cat1";
     public bool autoSave = true;
@@ -87,6 +87,7 @@ public class CatAgent : MonoBehaviour
     [Header("Observation Scale")]
     public float posScale = 10f;
     public float velScale = 20f;
+    public float specialInputBoost = 6f;   // 特技の脳にだけ、クリック・ホールド関連の入力（8〜17番）を大きく見せる（指示を早く覚える）
     public float moveInputBoost = 10f;   // 移動の脳にだけ、カーソル・殴れる物の相対位置を大きく見せる（10倍 = 元のワールド座標の大きさ）
 
     private Vector3 lastMousePos;
@@ -115,9 +116,6 @@ public class CatAgent : MonoBehaviour
     private float rightDownSum = 0f;
     private float rightHoldSum = 0f;
     private const int HISTORY_SIZE = 50;
-
-    // 入力の直後は「何かを試したくなる」（どの入力でも同じ。特定の技には結び付けない）
-    private float arousalStart = -999f;
 
     private float decisionTimer = 0f;
     private float autoSaveTimer = 0f;
@@ -154,12 +152,8 @@ public class CatAgent : MonoBehaviour
     // 直近の決定で猫が受け取った観測値（脳への入力にも使う。シーンには保存しない）
     [System.NonSerialized] public float[] DebugObs = new float[ObsCount];
     private readonly float[] moveObs = new float[ObsCount];
+    private readonly float[] specialObs = new float[ObsCount];
     private int obsIndex = 0;
-
-    private float ArousalLevel
-    {
-        get { return Mathf.Clamp01(1f - (Time.unscaledTime - arousalStart) / arousalSeconds); }
-    }
 
     void Awake()
     {
@@ -255,17 +249,13 @@ public class CatAgent : MonoBehaviour
         mouseVelocity = Vector2.Lerp(mouseVelocity, rawVel, 0.3f);
         lastMousePos = currentMousePos;
 
-        // ホールド（押し始めた瞬間も「入力があった」とみなす）
-        float prevLeftHold = leftHoldSignal;
-        float prevRightHold = rightHoldSignal;
+        // ホールド
         if (Input.GetMouseButton(0)) leftHoldTimer += Time.deltaTime;
         else leftHoldTimer = 0f;
         if (Input.GetMouseButton(1)) rightHoldTimer += Time.deltaTime;
         else rightHoldTimer = 0f;
         leftHoldSignal = (leftHoldTimer >= holdThreshold) ? 1f : 0f;
         rightHoldSignal = (rightHoldTimer >= holdThreshold) ? 1f : 0f;
-        if ((leftHoldSignal > prevLeftHold) || (rightHoldSignal > prevRightHold))
-            arousalStart = Time.unscaledTime;
 
         // クリックの痕跡（時間とともに減る）と、次の観測まで保持するラッチ
         leftCommandTimer = Mathf.Max(0f, leftCommandTimer - Time.deltaTime);
@@ -274,13 +264,11 @@ public class CatAgent : MonoBehaviour
         {
             leftClickLatch = 1f;
             leftCommandTimer = commandDuration;
-            arousalStart = Time.unscaledTime;
         }
         if (Input.GetMouseButtonDown(1))
         {
             rightClickLatch = 1f;
             rightCommandTimer = commandDuration;
-            arousalStart = Time.unscaledTime;
         }
 
         // 褒める・叱る（プレイヤーの介入はこれだけ。Shiftで強く）
@@ -298,8 +286,10 @@ public class CatAgent : MonoBehaviour
         // Inspector の学習率を、再生中も反映する（いろいろ試せるように）
         moveBrain.learningRate = learningRate;
         specialBrain.learningRate = learningRate;
-        specialBrain.epsSpecialMax = arousalExplore;
+        specialBrain.epsSpecialMax = baseExplore;
         specialBrain.epsSpecialBase = baseExplore;
+        specialBrain.explorePower = explorePower;
+        specialBrain.maxDelay = specialFeedbackWindow;
 
         // 押された評価を、あとで復習する
         moveBrain.BackgroundReplay(Time.unscaledTime);
@@ -371,7 +361,10 @@ public class CatAgent : MonoBehaviour
         moveObs[23] *= moveInputBoost;   // いちばん近い殴れる物 x
         moveObs[24] *= moveInputBoost;   // いちばん近い殴れる物 y
         moveBrain.Decide(moveObs, false, false, 0f, now, out move, out ignoredSpecial);
-        specialBrain.Decide(DebugObs, jumpOk, punchOk, ArousalLevel, now, out ignoredMove, out special);
+        // 特技の脳には、クリック・ホールド関連の入力（現在の入力、傾向、痕跡）を大きくして渡す
+        System.Array.Copy(DebugObs, specialObs, ObsCount);
+        for (int i = 7; i <= 16; i++) specialObs[i] *= specialInputBoost;
+        specialBrain.Decide(specialObs, jumpOk, punchOk, 0f, now, out ignoredMove, out special);
         ApplyActions(move, special);
     }
 
