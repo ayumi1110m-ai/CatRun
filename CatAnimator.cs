@@ -21,11 +21,12 @@ public class CatAnimator : MonoBehaviour
     public string punchState = "Punch";
     public string dashState = "Dash";       // ダッシュを入れたときに使う
     public string sitState = "Sit";
+    public string loafState = "Loaf";       // 香箱座り（長く止まっているとき。スタミナの回復が速い）
 
     [Header("切り替え")]
     public float crossFade = 0.05f;
     public float walkSpeedThreshold = 0.1f; // これより速く動いていたら「歩き」
-    public float sitAfterSeconds = 3f;      // これだけ止まっていたら「座る」
+    // 座る・香箱座りになるまでの秒数は、CatAgent の Sit After Seconds / Loaf After Seconds で決まる
     public float punchMinSeconds = 0.6f;    // パンチのアニメを、最低これだけ見せる
 
     [Header("振り向き（斜め・正面のイラストを使う）")]
@@ -214,8 +215,10 @@ public class CatAnimator : MonoBehaviour
             return walkState;
         }
 
-        idleTimer += Time.deltaTime;
-        if (idleTimer >= sitAfterSeconds) return sitState;
+        // 止まっている時間に応じて、立つ → 座る → 香箱座り
+        int rest = cat.RestLevel;
+        if (rest >= 2 && !string.IsNullOrEmpty(loafState)) return loafState;
+        if (rest >= 1) return sitState;
         return string.IsNullOrEmpty(idleState) ? sitState : idleState;
     }
 

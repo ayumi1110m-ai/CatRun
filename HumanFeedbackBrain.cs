@@ -30,8 +30,10 @@ public class HumanFeedbackBrain
     public float pMax = 0.97f;              // 褒めても、これより高い確率にはさらに押し込まない
 
     // ---- 行動の選び方 ----
-    public float epsSpecialBase = 0.01f;    // 気まぐれに技を試す確率（普段）
-    public float epsSpecialMax = 0.15f;     // 気まぐれに技を試す確率（入力の直後）
+    public float epsSpecialBase = 0f;       // 気まぐれに技を試す確率（普段。0 = なし）
+    public float epsSpecialMax = 0f;        // 気まぐれに技を試す確率（上限。0 = なし）
+    public float exploreRefMass = 0.015f;   // 技を出す確率の合計が、これより低い状況では、気まぐれを減らす
+    public float explorePower = 3f;         // 気まぐれを減らす強さ（大きいほど、叱られた状況で試さなくなる）
     public float epsMove = 0.05f;           // 移動をランダムにする確率
     public float moveStickiness = 0.7f;     // 前の移動をそのまま続ける確率
 
@@ -163,7 +165,11 @@ public class HumanFeedbackBrain
         prevMove = move;
 
         // 特技：入力の直後は、気まぐれに何かを試しやすくする
-        float eps = epsSpecialBase + (epsSpecialMax - epsSpecialBase) * Clamp01(arousal);
+        // 叱られて「技を出さない」と覚えた状況では、気まぐれに試す回数も減らす
+        // （これがないと、どれだけ叱っても、入力のたびに一定の割合で技を試してしまう）
+        float specialMass = SpecialProbs[1] + SpecialProbs[2];
+        float exploreScale = (float)Math.Pow(Math.Min(1f, specialMass / exploreRefMass), explorePower);
+        float eps = (epsSpecialBase + (epsSpecialMax - epsSpecialBase) * Clamp01(arousal)) * exploreScale;
         int n = 0;
         if (jumpOk) allowed[n++] = 1;
         if (punchOk) allowed[n++] = 2;

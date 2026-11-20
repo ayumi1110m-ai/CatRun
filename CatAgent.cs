@@ -43,18 +43,32 @@ public class CatAgent : MonoBehaviour
     public float scoldReward = -1.0f;        // X
     public float strongMultiplier = 3f;      // Shiftを押しながらで何倍にするか
 
+    [Header("Stamina（技を出すと減る。0になると息切れして、回復が遅くなる）")]
+    public float staminaMax = 100f;
+    public float jumpCost = 25f;
+    public float punchCost = 20f;
+    public float regenNormal = 12f;             // 毎秒の回復
+    public float regenExhausted = 5f;           // 息切れ中の毎秒の回復
+    public float exhaustPauseSeconds = 1.5f;    // 0になったあと、回復が止まる時間
+    public float exhaustRecoverTo = 30f;        // このスタミナまで戻ったら、息切れが終わる
+    public float sitAfterSeconds = 3f;          // 止まってから、座るまでの秒数
+    public float loafAfterSeconds = 6f;         // 止まってから、香箱座りになるまでの秒数
+    public float restMultiplierSit = 1.5f;      // 座っている間の、回復の倍率
+    public float restMultiplierLoaf = 3f;       // 香箱座りの間の、回復の倍率
+    public bool showStaminaBar = true;
+    public float staminaBarOffsetY = 1.1f;      // 猫の中心から、ゲージまでの高さ
+    private float stamina;
+    private bool exhausted = false;
+    private float exhaustPause = 0f;
+    private float stillTimer = 0f;
+
     [Header("Jump")]
     public float jumpForce = 3f;
-    public int maxJumpsInWindow = 3;
-    public float jumpWindowSeconds = 10f;
     public float jumpMemorySeconds = 3f;
-    private Queue<float> jumpTimes = new Queue<float>();
     private float lastJumpTime = -999f;
     private bool isGrounded => IsGroundedNow();
 
     [Header("Punch")]
-    public int maxPunchesInWindow = 3;
-    public float punchWindowSeconds = 10f;
     public float punchMemorySeconds = 3f;
     public float punchReach = 0.9f;
     public float punchRadius = 0.6f;
@@ -66,7 +80,6 @@ public class CatAgent : MonoBehaviour
     private bool isTurning = false;            // 振り向き中（立ち止まって向きを変える）
     private float turnTimer = 0f;
     private int turnFromFacing = 1;
-    private Queue<float> punchTimes = new Queue<float>();
     private float lastPunchTime = -999f;
     private GameObject paw;
     private float pawTimer = 0f;
@@ -87,7 +100,7 @@ public class CatAgent : MonoBehaviour
     [Header("Observation Scale")]
     public float posScale = 10f;
     public float velScale = 20f;
-    public float specialInputBoost = 6f;   // 特技の脳にだけ、クリック・ホールド関連の入力（8〜17番）を大きく見せる（指示を早く覚える）
+    public float specialInputGain = 2f;    // 特技の脳への入力を、ふだんの大きさに合わせて自動で整えたあとの倍率（どの入力にも同じルール）
     public float moveInputBoost = 10f;   // 移動の脳にだけ、カーソル・殴れる物の相対位置を大きく見せる（10倍 = 元のワールド座標の大きさ）
 
     private Vector3 lastMousePos;
@@ -135,6 +148,9 @@ public class CatAgent : MonoBehaviour
     public bool IsWindingUp => isWindingUp;
     public bool IsRecovering => isRecovering;
     public bool IsTurning => isTurning;
+    public float Stamina01 => staminaMax > 0f ? Mathf.Clamp01(stamina / staminaMax) : 0f;
+    public bool IsExhausted => exhausted;
+    public int RestLevel => stillTimer >= loafAfterSeconds ? 2 : (stillTimer >= sitAfterSeconds ? 1 : 0);   // 0=動いている, 1=座っている, 2=香箱座り
     public int TurnFromFacing => turnFromFacing;               // 振り向く前の向き
     public float TurnProgress => turnSeconds > 0f ? Mathf.Clamp01(1f - turnTimer / turnSeconds) : 1f;
     public int WindupKindId => windupKind;                      // 0=なし, 1=ジャンプ, 2=パンチ
@@ -153,6 +169,7 @@ public class CatAgent : MonoBehaviour
     [System.NonSerialized] public float[] DebugObs = new float[ObsCount];
     private readonly float[] moveObs = new float[ObsCount];
     private readonly float[] specialObs = new float[ObsCount];
+    private RunningNormalizer specialNormalizer;
     private int obsIndex = 0;
 
     void Awake()
@@ -160,6 +177,7 @@ public class CatAgent : MonoBehaviour
         rb = GetComponent<Rigidbody2D>();
         col = GetComponent<Collider2D>();
         sr = GetComponent<SpriteRenderer>();
+        stamina = staminaMax;
         if (!showPlaceholder && sr != null) sr.enabled = false;
         CreatePaw();
         SetSpeedLevel(0);
@@ -168,6 +186,7 @@ public class CatAgent : MonoBehaviour
         // 隠れ層まで完全に分けた2つの脳。どちらも全部の入力を見られる（どの入力も指示に使えるように）
         moveBrain = new HumanFeedbackBrain(ObsCount, hiddenSize, seed, 8f);
         moveBrain.kernelSigma = 0.4f;
+        specialNormalizer = new RunningNormalizer(ObsCount);
         specialBrain = new HumanFeedbackBrain(ObsCount, hiddenSize, seed + 100, specialNoneBias);
         specialBrain.kernelSigma = 0.3f;
         moveBrain.learningRate = learningRate;
@@ -219,6 +238,8 @@ public class CatAgent : MonoBehaviour
                 else ExecuteJump();
             }
         }
+
+        UpdateStamina(Time.deltaTime);
 
         // 振り向き
         if (isTurning)
@@ -349,8 +370,8 @@ public class CatAgent : MonoBehaviour
         CollectObservations();
         UpdateHistories();
 
-        bool jumpOk = isGrounded && !isWindingUp && !isRecovering && !isTurning && CanJumpByRate();
-        bool punchOk = !isWindingUp && !isRecovering && !isTurning && CanPunchByRate();
+        bool jumpOk = isGrounded && !isWindingUp && !isRecovering && !isTurning && CanAct();
+        bool punchOk = !isWindingUp && !isRecovering && !isTurning && CanAct();
 
         float now = Time.unscaledTime;
         int move, special, ignoredSpecial, ignoredMove;
@@ -361,9 +382,10 @@ public class CatAgent : MonoBehaviour
         moveObs[23] *= moveInputBoost;   // いちばん近い殴れる物 x
         moveObs[24] *= moveInputBoost;   // いちばん近い殴れる物 y
         moveBrain.Decide(moveObs, false, false, 0f, now, out move, out ignoredSpecial);
-        // 特技の脳には、クリック・ホールド関連の入力（現在の入力、傾向、痕跡）を大きくして渡す
-        System.Array.Copy(DebugObs, specialObs, ObsCount);
-        for (int i = 7; i <= 16; i++) specialObs[i] *= specialInputBoost;
+        // 特技の脳には、すべての入力を、その入力のふだんの大きさに合わせて自動で整えて渡す
+        // （めったに起きない入力は大きく、よく動く入力は落ち着いた値になる。特定の入力は特別扱いしない）
+        specialNormalizer.gain = specialInputGain;
+        specialNormalizer.Apply(DebugObs, specialObs);
         specialBrain.Decide(specialObs, jumpOk, punchOk, 0f, now, out ignoredMove, out special);
         ApplyActions(move, special);
     }
@@ -414,9 +436,8 @@ public class CatAgent : MonoBehaviour
         Obs(leftCommandTimer / commandDuration);
         Obs(rightCommandTimer / commandDuration);
 
-        // 18: ジャンプ残り回数（0〜1）
-        CanJumpByRate();
-        Obs((float)(maxJumpsInWindow - jumpTimes.Count) / maxJumpsInWindow);
+        // 18: スタミナ（0〜1）
+        Obs(Stamina01);
 
         // 19: 最後のジャンプからの経過（0=直後, 1=jumpMemorySeconds以上前）
         Obs(Mathf.Clamp01((Time.time - lastJumpTime) / jumpMemorySeconds));
@@ -497,10 +518,16 @@ public class CatAgent : MonoBehaviour
         // 技：出すと決めたら予備動作に入る（同時には1つだけ）
         if (special != 0 && !isWindingUp && !isRecovering && !isTurning)
         {
-            if (special == JumpIndex && isGrounded && CanJumpByRate())
+            if (special == JumpIndex && isGrounded && CanAct())
+            {
+                Spend(jumpCost);
                 StartWindup(KindJump, windupDuration);
-            else if (special == PunchIndex && CanPunchByRate())
+            }
+            else if (special == PunchIndex && CanAct())
+            {
+                Spend(punchCost);
                 StartWindup(KindPunch, punchWindupDuration);
+            }
         }
 
         if (isWindingUp || isRecovering || isTurning) vel.x = 0f;   // 予備動作中・硬直中・振り向き中は動かない
@@ -510,18 +537,43 @@ public class CatAgent : MonoBehaviour
     // ------------------------------------------------------------------
     // 技
     // ------------------------------------------------------------------
-    private bool CanJumpByRate()
+    // スタミナが少しでも残っていて、息切れしていなければ、技を出せる（足りない分は、0まで減る）
+    private bool CanAct()
     {
-        while (jumpTimes.Count > 0 && Time.time - jumpTimes.Peek() > jumpWindowSeconds)
-            jumpTimes.Dequeue();
-        return jumpTimes.Count < maxJumpsInWindow;
+        return !exhausted && stamina > 0.5f;
     }
 
-    private bool CanPunchByRate()
+    private void Spend(float cost)
     {
-        while (punchTimes.Count > 0 && Time.time - punchTimes.Peek() > punchWindowSeconds)
-            punchTimes.Dequeue();
-        return punchTimes.Count < maxPunchesInWindow;
+        stamina = Mathf.Max(0f, stamina - cost);
+        if (stamina <= 0.01f)
+        {
+            // 使い切った：しばらく回復が止まり、そのあとも遅くなる
+            exhausted = true;
+            exhaustPause = exhaustPauseSeconds;
+        }
+    }
+
+    private void UpdateStamina(float dt)
+    {
+        // 止まっている時間（座る・香箱座りの判定）
+        bool still = isGrounded && !isWindingUp && !isRecovering && !isTurning
+                     && Mathf.Abs(rb.linearVelocity.x) < 0.1f;
+        stillTimer = still ? stillTimer + dt : 0f;
+
+        if (exhaustPause > 0f)
+        {
+            exhaustPause -= dt;
+            return;
+        }
+
+        float rate = exhausted ? regenExhausted : regenNormal;
+        int rest = RestLevel;
+        if (rest >= 2) rate *= restMultiplierLoaf;
+        else if (rest == 1) rate *= restMultiplierSit;
+
+        stamina = Mathf.Min(staminaMax, stamina + rate * dt);
+        if (exhausted && stamina >= exhaustRecoverTo) exhausted = false;
     }
 
     // 足元に地面があるか（壁に触れているだけでは接地にならない）
@@ -564,7 +616,6 @@ public class CatAgent : MonoBehaviour
         v.y = jumpForce;
         rb.linearVelocity = v;
 
-        jumpTimes.Enqueue(Time.time);
         lastJumpTime = Time.time;
         if (JumpPerformed != null) JumpPerformed();
         Debug.Log($"JUMP game={Time.time:F1}s real={Time.realtimeSinceStartup:F1}s");
@@ -587,7 +638,6 @@ public class CatAgent : MonoBehaviour
             hits++;
         }
 
-        punchTimes.Enqueue(Time.time);
         lastPunchTime = Time.time;
         if (PunchPerformed != null) PunchPerformed();
 
@@ -623,6 +673,8 @@ public class CatAgent : MonoBehaviour
         data.hidden = hiddenSize;
         data.weights = moveBrain.GetWeights();
         data.weightsSpecial = specialBrain.GetWeights();
+        data.normMean = specialNormalizer.GetMean();
+        data.normVar = specialNormalizer.GetVariance();
         File.WriteAllText(SavePath, JsonUtility.ToJson(data));
     }
 
@@ -634,6 +686,7 @@ public class CatAgent : MonoBehaviour
         if (data.weightsSpecial == null) return;
         bool okMove = moveBrain.SetWeights(data.weights);
         bool okSpecial = specialBrain.SetWeights(data.weightsSpecial);
+        specialNormalizer.SetState(data.normMean, data.normVar);
         if (okMove && okSpecial) Debug.Log("猫の脳を読み込みました: " + SavePath);
     }
 
@@ -659,9 +712,52 @@ public class CatAgent : MonoBehaviour
         recoveryTimer = 0f;
         isTurning = false;
         turnTimer = 0f;
+        stamina = staminaMax;
+        exhausted = false;
+        exhaustPause = 0f;
+        stillTimer = 0f;
         decisionTimer = 0f;
         if (paw != null) paw.SetActive(false);
         pawTimer = 0f;
+    }
+
+    // 猫の頭の上のスタミナゲージ（息切れ中は、赤く点滅する）
+    private void DrawStaminaBar()
+    {
+        Camera cam = Camera.main;
+        if (cam == null || !cam.orthographic) return;
+
+        float ppu = Screen.height / (2f * cam.orthographicSize);
+        Vector3 sp = cam.WorldToScreenPoint(transform.position + new Vector3(0f, staminaBarOffsetY, 0f));
+        float w = 1.4f * ppu;
+        float h = 0.16f * ppu;
+        Rect back = new Rect(sp.x - w / 2f, Screen.height - sp.y - h / 2f, w, h);
+
+        GUI.color = new Color(0f, 0f, 0f, 0.7f);
+        GUI.DrawTexture(new Rect(back.x - 2f, back.y - 2f, back.width + 4f, back.height + 4f), Texture2D.whiteTexture);
+
+        Color fill;
+        if (exhausted)
+        {
+            float blink = 0.55f + 0.45f * Mathf.Sin(Time.unscaledTime * 12f);
+            fill = new Color(1f, 0.25f * blink, 0.2f * blink, 1f);
+        }
+        else
+        {
+            fill = Color.Lerp(new Color(1f, 0.35f, 0.25f), new Color(0.35f, 0.9f, 0.4f), Stamina01);
+        }
+        GUI.color = fill;
+        GUI.DrawTexture(new Rect(back.x, back.y, back.width * Stamina01, back.height), Texture2D.whiteTexture);
+        GUI.color = Color.white;
+
+        if (exhausted)
+        {
+            GUIStyle tired = new GUIStyle();
+            tired.fontSize = Mathf.Max(12, Mathf.RoundToInt(h * 1.4f));
+            tired.alignment = TextAnchor.LowerCenter;
+            tired.normal.textColor = new Color(1f, 0.5f, 0.4f);
+            GUI.Label(new Rect(back.x, back.y - h * 2f, back.width, h * 2f), "息切れ", tired);
+        }
     }
 
     private void OnGUI()
@@ -669,11 +765,12 @@ public class CatAgent : MonoBehaviour
         GUIStyle hint = new GUIStyle();
         hint.fontSize = 16;
         hint.normal.textColor = Color.white;
-        CanJumpByRate();
         GUI.Label(new Rect(16, 16, 620, 40),
-            "Z:褒める  X:叱る  (Shiftで強く)  ジャンプ残り:" + (maxJumpsInWindow - jumpTimes.Count), hint);
+            "Z:褒める  X:叱る  (Shiftで強く)  スタミナ:" + Mathf.RoundToInt(stamina) + (exhausted ? "  息切れ" : ""), hint);
         GUI.Label(new Rect(16, 40, 620, 40),
             "速度: x" + speedLevels[speedIndex] + "  (←/→で変更)", hint);
+
+        if (showStaminaBar) DrawStaminaBar();
 
         if (feedbackTimer > 0f)
         {
@@ -694,4 +791,6 @@ public class CatBrainSave
     public int hidden;
     public float[] weights;          // 移動の脳
     public float[] weightsSpecial;   // 特技の脳
+    public float[] normMean;         // 特技の脳への入力を整えるときの、各入力のふだんの平均
+    public float[] normVar;          // 同じく、ふだんのばらつき
 }
