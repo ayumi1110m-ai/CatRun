@@ -14,6 +14,8 @@ public class CatAgent : MonoBehaviour
     private const int ObsCount = 25;
     private const int JumpIndex = 1;    // 特技: 1=ジャンプ
     private const int PunchIndex = 2;   // 特技: 2=パンチ
+    private const int DashIndex = 3;    // 特技: 3=ダッシュ
+    private const int SpecialCount = 4; // 特技の選択肢の数（しない / ジャンプ / パンチ / ダッシュ）
 
     public float moveSpeed = 2f;
     public float turnSeconds = 0.25f;        // 向きを変えるとき、立ち止まって振り向く時間（0 なら、すぐ向きを変える）
@@ -85,13 +87,24 @@ public class CatAgent : MonoBehaviour
     private float pawTimer = 0f;
     private int facing = 1;
 
+    [Header("Dash（予備動作で構えてから、少しのあいだ移動速度が上がる）")]
+    public float dashCost = 30f;
+    public float dashSpeedMultiplier = 2.5f;    // 歩く速さの何倍で走るか
+    public float dashSeconds = 0.8f;            // 走り続ける秒数
+    private bool isDashing = false;
+    private float dashTimer = 0f;
+    private int dashDir = 1;
+
     [Header("Windup (技を出すと決めてから実際に出るまでの間)")]
     public float windupDuration = 0.5f;
     public float punchWindupDuration = 0.4f;
+    public float dashWindupDuration = 0.35f;
     public Color windupColor = Color.yellow;
     public Color punchWindupColor = new Color(1f, 0.45f, 0.45f);
+    public Color dashWindupColor = new Color(0.5f, 0.8f, 1f);
     private const int KindJump = 1;
     private const int KindPunch = 2;
+    private const int KindDash = 3;
     private bool isWindingUp = false;
     private int windupKind = 0;
     private float windupTimer = 0f;
@@ -148,6 +161,7 @@ public class CatAgent : MonoBehaviour
     public bool IsWindingUp => isWindingUp;
     public bool IsRecovering => isRecovering;
     public bool IsTurning => isTurning;
+    public bool IsDashing => isDashing;
     public float Stamina01 => staminaMax > 0f ? Mathf.Clamp01(stamina / staminaMax) : 0f;
     public bool IsExhausted => exhausted;
     public int RestLevel => stillTimer >= loafAfterSeconds ? 2 : (stillTimer >= sitAfterSeconds ? 1 : 0);   // 0=動いている, 1=座っている, 2=香箱座り
@@ -161,6 +175,7 @@ public class CatAgent : MonoBehaviour
     public event System.Action<int> WindupStarted;              // 技の予備動作が始まった（引数は技の種類）
     public event System.Action JumpPerformed;                   // ジャンプで地面を蹴った
     public event System.Action PunchPerformed;                  // パンチを繰り出した
+    public event System.Action DashPerformed;                   // ダッシュで走り出した
 
     public HumanFeedbackBrain MoveBrain => moveBrain;
     public HumanFeedbackBrain SpecialBrain => specialBrain;
@@ -169,6 +184,8 @@ public class CatAgent : MonoBehaviour
     [System.NonSerialized] public float[] DebugObs = new float[ObsCount];
     private readonly float[] moveObs = new float[ObsCount];
     private readonly float[] specialObs = new float[ObsCount];
+    private readonly bool[] specialMask = new bool[SpecialCount];
+    private readonly bool[] noSpecials = new bool[SpecialCount] { true, false, false, false };
     private RunningNormalizer specialNormalizer;
     private int obsIndex = 0;
 
@@ -184,10 +201,10 @@ public class CatAgent : MonoBehaviour
 
         int seed = randomSeed != 0 ? randomSeed : System.Environment.TickCount;
         // 隠れ層まで完全に分けた2つの脳。どちらも全部の入力を見られる（どの入力も指示に使えるように）
-        moveBrain = new HumanFeedbackBrain(ObsCount, hiddenSize, seed, 8f);
+        moveBrain = new HumanFeedbackBrain(ObsCount, hiddenSize, seed, 8f, SpecialCount);
         moveBrain.kernelSigma = 0.4f;
         specialNormalizer = new RunningNormalizer(ObsCount);
-        specialBrain = new HumanFeedbackBrain(ObsCount, hiddenSize, seed + 100, specialNoneBias);
+        specialBrain = new HumanFeedbackBrain(ObsCount, hiddenSize, seed + 100, specialNoneBias, SpecialCount);
         specialBrain.kernelSigma = 0.3f;
         moveBrain.learningRate = learningRate;
         specialBrain.learningRate = learningRate;
@@ -230,16 +247,25 @@ public class CatAgent : MonoBehaviour
         {
             windupTimer -= Time.deltaTime;
             float progress = 1f - Mathf.Clamp01(windupTimer / windupTotal);
-            Color tint = (windupKind == KindPunch) ? punchWindupColor : windupColor;
+            Color tint = (windupKind == KindPunch) ? punchWindupColor
+                       : (windupKind == KindDash ? dashWindupColor : windupColor);
             if (sr != null) sr.color = Color.Lerp(Color.white, tint, progress);
             if (windupTimer <= 0f)
             {
                 if (windupKind == KindPunch) ExecutePunch();
+                else if (windupKind == KindDash) ExecuteDash();
                 else ExecuteJump();
             }
         }
 
         UpdateStamina(Time.deltaTime);
+
+        // ダッシュ（走っている間）
+        if (isDashing)
+        {
+            dashTimer -= Time.deltaTime;
+            if (dashTimer <= 0f) EndDash();
+        }
 
         // 振り向き
         if (isTurning)
@@ -370,8 +396,10 @@ public class CatAgent : MonoBehaviour
         CollectObservations();
         UpdateHistories();
 
-        bool jumpOk = isGrounded && !isWindingUp && !isRecovering && !isTurning && CanAct();
-        bool punchOk = !isWindingUp && !isRecovering && !isTurning && CanAct();
+        bool free = !isWindingUp && !isRecovering && !isTurning && !isDashing && CanAct();
+        bool jumpOk = free && isGrounded;
+        bool punchOk = free;
+        bool dashOk = free && isGrounded;
 
         float now = Time.unscaledTime;
         int move, special, ignoredSpecial, ignoredMove;
@@ -381,12 +409,16 @@ public class CatAgent : MonoBehaviour
         moveObs[1] *= moveInputBoost;    // カーソルとの相対位置 y
         moveObs[23] *= moveInputBoost;   // いちばん近い殴れる物 x
         moveObs[24] *= moveInputBoost;   // いちばん近い殴れる物 y
-        moveBrain.Decide(moveObs, false, false, 0f, now, out move, out ignoredSpecial);
+        moveBrain.Decide(moveObs, noSpecials, 0f, now, out move, out ignoredSpecial);
         // 特技の脳には、すべての入力を、その入力のふだんの大きさに合わせて自動で整えて渡す
         // （めったに起きない入力は大きく、よく動く入力は落ち着いた値になる。特定の入力は特別扱いしない）
         specialNormalizer.gain = specialInputGain;
         specialNormalizer.Apply(DebugObs, specialObs);
-        specialBrain.Decide(specialObs, jumpOk, punchOk, 0f, now, out ignoredMove, out special);
+        specialMask[0] = true;
+        specialMask[JumpIndex] = jumpOk;
+        specialMask[PunchIndex] = punchOk;
+        specialMask[DashIndex] = dashOk;
+        specialBrain.Decide(specialObs, specialMask, 0f, now, out ignoredMove, out special);
         ApplyActions(move, special);
     }
 
@@ -448,8 +480,8 @@ public class CatAgent : MonoBehaviour
         // 21: 最後のパンチからの経過
         Obs(Mathf.Clamp01((Time.time - lastPunchTime) / punchMemorySeconds));
 
-        // 22: 予備動作の種類（0=なし, 0.5=ジャンプ, 1=パンチ）
-        Obs(windupKind == KindPunch ? 1f : (windupKind == KindJump ? 0.5f : 0f));
+        // 22: 予備動作の種類（0=なし, 0.33=ジャンプ, 0.67=パンチ, 1=ダッシュ）
+        Obs(windupKind == KindDash ? 1f : (windupKind == KindPunch ? 0.67f : (windupKind == KindJump ? 0.33f : 0f)));
 
         // 23: 猫の向き（-1=左, 1=右）
         Obs(facing);
@@ -496,7 +528,7 @@ public class CatAgent : MonoBehaviour
         // 横移動と向き
         Vector2 vel = rb.linearVelocity;
         int desired = (move == 1) ? -1 : (move == 2 ? 1 : facing);
-        if (isTurning) desired = facing;   // 振り向いている間は、向きの指示を受け付けない
+        if (isTurning || isDashing) desired = facing;   // 振り向き中・ダッシュ中は、向きの指示を受け付けない
 
         if (desired != facing && turnSeconds > 0f && isGrounded && !isWindingUp && !isRecovering)
         {
@@ -516,7 +548,7 @@ public class CatAgent : MonoBehaviour
         else vel.x = 0f;
 
         // 技：出すと決めたら予備動作に入る（同時には1つだけ）
-        if (special != 0 && !isWindingUp && !isRecovering && !isTurning)
+        if (special != 0 && !isWindingUp && !isRecovering && !isTurning && !isDashing)
         {
             if (special == JumpIndex && isGrounded && CanAct())
             {
@@ -528,9 +560,15 @@ public class CatAgent : MonoBehaviour
                 Spend(punchCost);
                 StartWindup(KindPunch, punchWindupDuration);
             }
+            else if (special == DashIndex && isGrounded && CanAct())
+            {
+                Spend(dashCost);
+                StartWindup(KindDash, dashWindupDuration);
+            }
         }
 
         if (isWindingUp || isRecovering || isTurning) vel.x = 0f;   // 予備動作中・硬直中・振り向き中は動かない
+        if (isDashing) vel.x = dashDir * moveSpeed * dashSpeedMultiplier;   // ダッシュ中は、向いている方向に速く走る
         rb.linearVelocity = vel;
     }
 
@@ -557,7 +595,7 @@ public class CatAgent : MonoBehaviour
     private void UpdateStamina(float dt)
     {
         // 止まっている時間（座る・香箱座りの判定）
-        bool still = isGrounded && !isWindingUp && !isRecovering && !isTurning
+        bool still = isGrounded && !isWindingUp && !isRecovering && !isTurning && !isDashing
                      && Mathf.Abs(rb.linearVelocity.x) < 0.1f;
         stillTimer = still ? stillTimer + dt : 0f;
 
@@ -619,6 +657,30 @@ public class CatAgent : MonoBehaviour
         lastJumpTime = Time.time;
         if (JumpPerformed != null) JumpPerformed();
         Debug.Log($"JUMP game={Time.time:F1}s real={Time.realtimeSinceStartup:F1}s");
+    }
+
+    private void ExecuteDash()
+    {
+        EndWindup();
+        isDashing = true;
+        dashTimer = dashSeconds;
+        dashDir = facing;
+
+        Vector2 v = rb.linearVelocity;
+        v.x = dashDir * moveSpeed * dashSpeedMultiplier;
+        rb.linearVelocity = v;
+
+        if (DashPerformed != null) DashPerformed();
+        Debug.Log($"DASH game={Time.time:F1}s");
+    }
+
+    private void EndDash()
+    {
+        isDashing = false;
+        dashTimer = 0f;
+        Vector2 v = rb.linearVelocity;
+        v.x = 0f;
+        rb.linearVelocity = v;
     }
 
     private void ExecutePunch()
@@ -712,6 +774,8 @@ public class CatAgent : MonoBehaviour
         recoveryTimer = 0f;
         isTurning = false;
         turnTimer = 0f;
+        isDashing = false;
+        dashTimer = 0f;
         stamina = staminaMax;
         exhausted = false;
         exhaustPause = 0f;
