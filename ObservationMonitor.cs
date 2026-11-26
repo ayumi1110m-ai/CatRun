@@ -1,7 +1,7 @@
 using UnityEngine;
 using System.Collections.Generic;
 
-// 猫が受け取っている25個の観測値を、明暗セルで表示するモニター（プレイヤー向けの表示）
+// 猫が受け取っている29個の観測値を、明暗セルで表示するモニター（プレイヤー向けの表示）
 //  ・右上のパネル：観測値の大きさを明るさで、符号を色で表す（青=正、橙=負）
 //  ・猫からカーソルへの点線（相対位置）
 //  ・カーソルの尾（動いた軌跡が後ろに残る。速く動かすほど長く伸びる）
@@ -29,12 +29,12 @@ public class ObservationMonitor : MonoBehaviour
     }
 
     private readonly List<TailPoint> tail = new List<TailPoint>();
-    private readonly float[] shown = new float[25];
+    private readonly float[] shown = new float[29];
     private GUIStyle titleStyle, labelStyle, valueStyle, hintStyle;
 
     private static readonly string[] groupTitles =
     {
-        "位置と動き", "いまの入力", "入力の傾向（約5秒）", "クリックの痕跡", "特技の状態", "周りの様子"
+        "位置と動き", "いまの入力", "入力の傾向（約5秒）", "クリックの痕跡", "特技の状態", "周りの様子", "カーソルの動きの履歴"
     };
 
     private static readonly string[][] groupLabels =
@@ -44,7 +44,8 @@ public class ObservationMonitor : MonoBehaviour
         new[] { "左クリック", "左ホールド", "右クリック", "右ホールド" },
         new[] { "左", "右" },
         new[] { "スタミナ", "最後の跳躍から", "予備動作", "最後のパンチから", "予備動作の種類" },
-        new[] { "猫の向き", "近い物 x", "近い物 y" }
+        new[] { "猫の向き", "近い物 x", "近い物 y" },
+        new[] { "動きの痕跡", "速さの平均", "左右の平均", "上下の平均" }
     };
 
     void Awake()

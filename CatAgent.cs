@@ -11,7 +11,7 @@ public class CatAgent : MonoBehaviour
     private HumanFeedbackBrain moveBrain;      // 移動の脳
     private HumanFeedbackBrain specialBrain;   // 特技（ジャンプ・パンチ）の脳
 
-    private const int ObsCount = 25;
+    private const int ObsCount = 29;
     private const int JumpIndex = 1;    // 特技: 1=ジャンプ
     private const int PunchIndex = 2;   // 特技: 2=パンチ
     private const int DashIndex = 3;    // 特技: 3=ダッシュ
@@ -57,6 +57,7 @@ public class CatAgent : MonoBehaviour
     public float loafAfterSeconds = 6f;         // 止まってから、香箱座りになるまでの秒数
     public float restMultiplierSit = 1.5f;      // 座っている間の、回復の倍率
     public float restMultiplierLoaf = 3f;       // 香箱座りの間の、回復の倍率
+    public bool pauseRegenWhileActing = true;   // 技のアニメーション中（予備動作・ジャンプの空中・パンチ・ダッシュ）は、スタミナを回復しない
     public bool showStaminaBar = true;
     public float staminaBarOffsetY = 1.1f;      // 猫の中心から、ゲージまでの高さ
     private float stamina;
@@ -124,6 +125,13 @@ public class CatAgent : MonoBehaviour
     public float commandDuration = 2f;
     private float leftHoldTimer = 0f;
     private float rightHoldTimer = 0f;
+    private float mouseTrace = 0f;                       // カーソルの動きの痕跡
+    private Queue<float> mouseSpeedHistory = new Queue<float>();
+    private Queue<float> mouseVxHistory = new Queue<float>();
+    private Queue<float> mouseVyHistory = new Queue<float>();
+    private float mouseSpeedSum = 0f;
+    private float mouseVxSum = 0f;
+    private float mouseVySum = 0f;
     private float leftClickLatch = 0f;
     private float rightClickLatch = 0f;
     private float observedLeftClick = 0f;
@@ -142,6 +150,7 @@ public class CatAgent : MonoBehaviour
     private float rightDownSum = 0f;
     private float rightHoldSum = 0f;
     private const int HISTORY_SIZE = 50;
+    private const int MOTION_SIZE = 15;     // カーソルの動きの平均をとる長さ（約1.5秒。短い動きが薄まらないように、クリックより短い）
 
     private float decisionTimer = 0f;
     private float autoSaveTimer = 0f;
@@ -222,6 +231,13 @@ public class CatAgent : MonoBehaviour
             rightDownHistory.Enqueue(0f);
             rightHoldHistory.Enqueue(0f);
         }
+
+        for (int i = 0; i < MOTION_SIZE; i++)
+        {
+            mouseSpeedHistory.Enqueue(0f);
+            mouseVxHistory.Enqueue(0f);
+            mouseVyHistory.Enqueue(0f);
+        }
     }
 
     // パンチの手（小さな丸）を子オブジェクトとして用意する
@@ -296,27 +312,43 @@ public class CatAgent : MonoBehaviour
         mouseVelocity = Vector2.Lerp(mouseVelocity, rawVel, 0.3f);
         lastMousePos = currentMousePos;
 
-        // ホールド
-        if (Input.GetMouseButton(0)) leftHoldTimer += Time.deltaTime;
-        else leftHoldTimer = 0f;
-        if (Input.GetMouseButton(1)) rightHoldTimer += Time.deltaTime;
-        else rightHoldTimer = 0f;
-        leftHoldSignal = (leftHoldTimer >= holdThreshold) ? 1f : 0f;
-        rightHoldSignal = (rightHoldTimer >= holdThreshold) ? 1f : 0f;
+        // カーソルの動きの痕跡（速く動いた直後が大きく、時間とともに減る。クリックの痕跡と同じ作り）
+        float speedN = Mathf.Clamp01(mouseVelocity.magnitude / velScale);
+        mouseTrace = Mathf.Max(speedN, mouseTrace - Time.deltaTime / commandDuration);
 
-        // クリックの痕跡（時間とともに減る）と、次の観測まで保持するラッチ
+        // クリックの痕跡（時間とともに減る）
         leftCommandTimer = Mathf.Max(0f, leftCommandTimer - Time.deltaTime);
         rightCommandTimer = Mathf.Max(0f, rightCommandTimer - Time.deltaTime);
-        if (Input.GetMouseButtonDown(0))
+
+        // ホールドと、クリック
+        //   短い押しは、離した時点でクリックと判定する。
+        //   長い押しの押し始めは、クリックに数えない（クリックとホールドを見分けられるようにするため）。
+        if (Input.GetMouseButton(0)) leftHoldTimer += Time.deltaTime;
+        if (Input.GetMouseButtonUp(0))
         {
-            leftClickLatch = 1f;
-            leftCommandTimer = commandDuration;
+            if (leftHoldTimer < holdThreshold)
+            {
+                leftClickLatch = 1f;
+                leftCommandTimer = commandDuration;
+            }
+            leftHoldTimer = 0f;
         }
-        if (Input.GetMouseButtonDown(1))
+        else if (!Input.GetMouseButton(0)) leftHoldTimer = 0f;
+
+        if (Input.GetMouseButton(1)) rightHoldTimer += Time.deltaTime;
+        if (Input.GetMouseButtonUp(1))
         {
-            rightClickLatch = 1f;
-            rightCommandTimer = commandDuration;
+            if (rightHoldTimer < holdThreshold)
+            {
+                rightClickLatch = 1f;
+                rightCommandTimer = commandDuration;
+            }
+            rightHoldTimer = 0f;
         }
+        else if (!Input.GetMouseButton(1)) rightHoldTimer = 0f;
+
+        leftHoldSignal = (leftHoldTimer >= holdThreshold) ? 1f : 0f;
+        rightHoldSignal = (rightHoldTimer >= holdThreshold) ? 1f : 0f;
 
         // 褒める・叱る（プレイヤーの介入はこれだけ。Shiftで強く）
         bool strong = Input.GetKey(KeyCode.LeftShift) || Input.GetKey(KeyCode.RightShift);
@@ -502,6 +534,16 @@ public class CatAgent : MonoBehaviour
         }
         Obs(Mathf.Clamp(targetRel.x, -1f, 1f));
         Obs(Mathf.Clamp(targetRel.y, -1f, 1f));
+
+        // 26: カーソルの動きの痕跡（速く動いた直後が大きく、commandDuration秒かけて減る）
+        Obs(mouseTrace);
+
+        // 27: 最近（約1.5秒）のカーソルの速さの平均
+        Obs(mouseSpeedSum / MOTION_SIZE);
+
+        // 28-29: 最近（約1.5秒）のカーソルの動く向きの平均（左右・上下）。往復して振ると、平均は0に近く、速さの平均だけ大きくなる
+        Obs(mouseVxSum / MOTION_SIZE);
+        Obs(mouseVySum / MOTION_SIZE);
     }
 
     private void UpdateHistories()
@@ -521,6 +563,23 @@ public class CatAgent : MonoBehaviour
         rightDownSum += observedRightClick;
         rightHoldHistory.Enqueue(rightHoldSignal);
         rightHoldSum += rightHoldSignal;
+
+        // カーソルの動き（速さと、向きの平均）
+        if (mouseSpeedHistory.Count >= MOTION_SIZE)
+        {
+            mouseSpeedSum -= mouseSpeedHistory.Dequeue();
+            mouseVxSum -= mouseVxHistory.Dequeue();
+            mouseVySum -= mouseVyHistory.Dequeue();
+        }
+        float msp = Mathf.Clamp01(mouseVelocity.magnitude / velScale);
+        float mvx = Mathf.Clamp(mouseVelocity.x / velScale, -1f, 1f);
+        float mvy = Mathf.Clamp(mouseVelocity.y / velScale, -1f, 1f);
+        mouseSpeedHistory.Enqueue(msp);
+        mouseSpeedSum += msp;
+        mouseVxHistory.Enqueue(mvx);
+        mouseVxSum += mvx;
+        mouseVyHistory.Enqueue(mvy);
+        mouseVySum += mvy;
     }
 
     private void ApplyActions(int move, int special)
@@ -598,6 +657,9 @@ public class CatAgent : MonoBehaviour
         bool still = isGrounded && !isWindingUp && !isRecovering && !isTurning && !isDashing
                      && Mathf.Abs(rb.linearVelocity.x) < 0.1f;
         stillTimer = still ? stillTimer + dt : 0f;
+
+        // 技のアニメーション中は、回復しない（息切れの「回復が止まる時間」も、技が終わってから数え始める）
+        if (pauseRegenWhileActing && (isWindingUp || isRecovering || isDashing || !isGrounded || PunchActive)) return;
 
         if (exhaustPause > 0f)
         {

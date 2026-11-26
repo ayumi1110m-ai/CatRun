@@ -2,10 +2,10 @@ using System;
 
 // 人間の「褒める・叱る」だけで学ぶ小さな脳（Unityに依存しない純粋なC#）
 //
-//  構造   : 観測 → 隠れ層(tanh) → 隠れ層(tanh) → 「移動」3択 と 「特技」3択（0=しない,1=ジャンプ,2=パンチ）
+//  構造   : 観測 → 隠れ層(tanh) → 隠れ層(tanh) → 「移動」3択 と 「特技」N択（0=しない,1=ジャンプ,2=パンチ,3=ダッシュ…）
 //  学習   : フィードバックが来たら、直近の行動に遡って、その行動の選ばれやすさを上げ下げする
 //  遡り方 : 人間は行動の少しあとに押すので、約0.8秒前の行動に一番強く効かせる
-//  帰属   : 直近に技（ジャンプ・パンチ）を出していれば、フィードバックは技への評価として扱い、
+//  帰属   : 直近に技を出していれば、フィードバックは技への評価として扱い、
 //           出していなければ移動への評価として扱う
 //  再利用 : 押された1回を、あとで何度か復習する（リプレイ）
 //  歯止め : すでに極端な確率になっている行動を、さらに押し込まない（学習が潰れるのを防ぐ）
@@ -13,9 +13,11 @@ public class HumanFeedbackBrain
 {
     public const int HeadMove = 0;
     public const int HeadSpecial = 1;
+    public const int MoveCount = 3;
 
     public readonly int ObsSize;
     public readonly int Hidden;
+    public readonly int SpecialCount;
 
     // ---- 学習の設定 ----
     public float learningRate = 0.04f;
@@ -40,8 +42,8 @@ public class HumanFeedbackBrain
     // ---- 可視化用（直近の決定の内部状態）----
     public readonly float[] H1;
     public readonly float[] H2;
-    public readonly float[] MoveProbs = new float[3];
-    public readonly float[] SpecialProbs = new float[3];
+    public readonly float[] MoveProbs = new float[MoveCount];
+    public readonly float[] SpecialProbs;
 
     // ---- 重み ----
     private readonly float[] w1, b1, w2, b2, wm, bm, ws, bs;
@@ -55,8 +57,7 @@ public class HumanFeedbackBrain
         public float[] x;
         public int move;
         public int sp;
-        public bool jumpOk;
-        public bool punchOk;
+        public bool[] mask;     // その決定のとき、出せた技
         public float t;
     }
 
@@ -72,8 +73,7 @@ public class HumanFeedbackBrain
         public int head;
         public int action;
         public float coef;
-        public bool jumpOk;
-        public bool punchOk;
+        public bool[] mask;
     }
 
     private const int ReplayCap = 300;
@@ -83,14 +83,17 @@ public class HumanFeedbackBrain
     private float lastReplay = 0f;
 
     // 計算用の作業領域（毎回確保しない）
-    private readonly float[] sh1, sh2, szm, szs, pTmp = new float[3];
-    private readonly bool[] maskTmp = new bool[3];
-    private readonly float[] gm = new float[3];
-    private readonly float[] gs = new float[3];
+    private readonly float[] sh1, sh2, szm, szs;
+    private readonly float[] pTmpM = new float[MoveCount];
+    private readonly float[] pTmpS;
+    private readonly bool[] maskTmp;        // 行動を決めるとき用
+    private readonly bool[] maskUpd;        // 学習の更新用
+    private readonly float[] gm = new float[MoveCount];
+    private readonly float[] gs;
     private readonly float[] dpre1, dpre2;
-    private readonly float[] zmDec = new float[3];
-    private readonly float[] zsDec = new float[3];
-    private readonly int[] allowed = new int[2];
+    private readonly float[] zmDec = new float[MoveCount];
+    private readonly float[] zsDec;
+    private readonly int[] allowed;
     private readonly int[] winIdx = new int[StepCap];
     private readonly int[] evIdx = new int[StepCap];
     private readonly float[] wts = new float[StepCap];
@@ -103,16 +106,17 @@ public class HumanFeedbackBrain
         }
     }
 
-    public HumanFeedbackBrain(int obsSize, int hidden, int seed, float specialNoneBias)
+    public HumanFeedbackBrain(int obsSize, int hidden, int seed, float specialNoneBias, int specialCount = 4)
     {
         ObsSize = obsSize;
         Hidden = hidden;
+        SpecialCount = specialCount;
         rng = new Random(seed);
 
         w1 = new float[hidden * obsSize]; b1 = new float[hidden];
         w2 = new float[hidden * hidden]; b2 = new float[hidden];
-        wm = new float[3 * hidden]; bm = new float[3];
-        ws = new float[3 * hidden]; bs = new float[3];
+        wm = new float[MoveCount * hidden]; bm = new float[MoveCount];
+        ws = new float[specialCount * hidden]; bs = new float[specialCount];
 
         FillGaussian(w1, 1f / (float)Math.Sqrt(obsSize));
         FillGaussian(w2, 1f / (float)Math.Sqrt(hidden));
@@ -124,26 +128,34 @@ public class HumanFeedbackBrain
         H2 = new float[hidden];
         sh1 = new float[hidden];
         sh2 = new float[hidden];
-        szm = new float[3];
-        szs = new float[3];
+        szm = new float[MoveCount];
+        szs = new float[specialCount];
+        SpecialProbs = new float[specialCount];
+        pTmpS = new float[specialCount];
+        maskTmp = new bool[specialCount];
+        maskUpd = new bool[specialCount];
+        gs = new float[specialCount];
+        zsDec = new float[specialCount];
+        allowed = new int[specialCount];
         dpre1 = new float[hidden];
         dpre2 = new float[hidden];
 
         for (int i = 0; i < StepCap; i++)
-            steps[i] = new Step { x = new float[obsSize] };
+            steps[i] = new Step { x = new float[obsSize], mask = new bool[specialCount] };
         for (int i = 0; i < ReplayCap; i++)
-            replay[i] = new Labeled { x = new float[obsSize] };
+            replay[i] = new Labeled { x = new float[obsSize], mask = new bool[specialCount] };
     }
 
     // ------------------------------------------------------------------
     // 行動を決める
+    //   specialAllowed[k] : 技 k を今出せるか（0番の「しない」は、常に選べる）
     // ------------------------------------------------------------------
-    public void Decide(float[] obs, bool jumpOk, bool punchOk, float arousal, float now,
+    public void Decide(float[] obs, bool[] specialAllowed, float arousal, float now,
                        out int move, out int special)
     {
         Forward(obs, H1, H2, zmDec, zsDec);
         Softmax(zmDec, null, MoveProbs);
-        maskTmp[0] = true; maskTmp[1] = jumpOk; maskTmp[2] = punchOk;
+        for (int k = 0; k < SpecialCount; k++) maskTmp[k] = (k == 0) || specialAllowed[k];
         Softmax(zsDec, maskTmp, SpecialProbs);
 
         // 移動：前の移動を続けやすくして、ちょこちょこ動きすぎないようにする
@@ -155,24 +167,24 @@ public class HumanFeedbackBrain
         {
             float r = NextFloat();
             float acc = 0f;
-            move = 2;
-            for (int k = 0; k < 3; k++)
+            move = MoveCount - 1;
+            for (int k = 0; k < MoveCount; k++)
             {
-                acc += (1f - epsMove) * MoveProbs[k] + epsMove / 3f;
+                acc += (1f - epsMove) * MoveProbs[k] + epsMove / MoveCount;
                 if (r < acc) { move = k; break; }
             }
         }
         prevMove = move;
 
-        // 特技：入力の直後は、気まぐれに何かを試しやすくする
-        // 叱られて「技を出さない」と覚えた状況では、気まぐれに試す回数も減らす
-        // （これがないと、どれだけ叱っても、入力のたびに一定の割合で技を試してしまう）
-        float specialMass = SpecialProbs[1] + SpecialProbs[2];
+        // 特技：気まぐれに試す回数は、叱られて「技を出さない」と覚えた状況では減らす
+        float specialMass = 0f;
+        for (int k = 1; k < SpecialCount; k++) specialMass += SpecialProbs[k];
         float exploreScale = (float)Math.Pow(Math.Min(1f, specialMass / exploreRefMass), explorePower);
         float eps = (epsSpecialBase + (epsSpecialMax - epsSpecialBase) * Clamp01(arousal)) * exploreScale;
+
         int n = 0;
-        if (jumpOk) allowed[n++] = 1;
-        if (punchOk) allowed[n++] = 2;
+        for (int k = 1; k < SpecialCount; k++)
+            if (maskTmp[k]) allowed[n++] = k;
 
         if (n > 0 && NextFloat() < eps)
         {
@@ -183,7 +195,7 @@ public class HumanFeedbackBrain
             float r = NextFloat();
             float acc = 0f;
             special = 0;
-            for (int k = 0; k < 3; k++)
+            for (int k = 0; k < SpecialCount; k++)
             {
                 acc += SpecialProbs[k];
                 if (r < acc) { special = k; break; }
@@ -195,8 +207,7 @@ public class HumanFeedbackBrain
         Array.Copy(obs, s.x, ObsSize);
         s.move = move;
         s.sp = special;
-        s.jumpOk = jumpOk;
-        s.punchOk = punchOk;
+        for (int k = 0; k < SpecialCount; k++) s.mask[k] = maskTmp[k];
         s.t = now;
         stepHead = (stepHead + 1) % StepCap;
         if (stepCount < StepCap) stepCount++;
@@ -237,7 +248,7 @@ public class HumanFeedbackBrain
             {
                 float w = sum > 1e-20f ? wts[i] / sum : 1f / nEv;
                 Step s = steps[evIdx[i]];
-                ApplyLabeled(s.x, HeadSpecial, s.sp, f * w, s.jumpOk, s.punchOk);
+                ApplyLabeled(s.x, HeadSpecial, s.sp, f * w, s.mask);
             }
         }
         else
@@ -253,7 +264,7 @@ public class HumanFeedbackBrain
             {
                 float w = sum > 1e-20f ? wts[i] / sum : 1f / nWin;
                 Step s = steps[winIdx[i]];
-                ApplyLabeled(s.x, HeadMove, s.move, f * w, s.jumpOk, s.punchOk);
+                ApplyLabeled(s.x, HeadMove, s.move, f * w, s.mask);
             }
         }
     }
@@ -269,11 +280,11 @@ public class HumanFeedbackBrain
         for (int i = 0; i < n; i++)
         {
             Labeled l = replay[rng.Next(replayCount)];
-            UpdateSample(l.x, l.head, l.action, l.coef, l.jumpOk, l.punchOk, learningRate * replayLrScale);
+            UpdateSample(l.x, l.head, l.action, l.coef, l.mask, learningRate * replayLrScale);
         }
     }
 
-    // 直近 maxDelay 秒のあいだに、技（ジャンプ・パンチ）を出していたか
+    // 直近 maxDelay 秒のあいだに、技（ジャンプ・パンチ・ダッシュ）を出していたか
     public bool HasSpecialEvent(float now)
     {
         for (int i = 0; i < stepCount; i++)
@@ -342,17 +353,16 @@ public class HumanFeedbackBrain
         return (float)Math.Exp(-(d * d) / (2f * kernelSigma * kernelSigma));
     }
 
-    private void ApplyLabeled(float[] x, int head, int action, float coef, bool jumpOk, bool punchOk)
+    private void ApplyLabeled(float[] x, int head, int action, float coef, bool[] mask)
     {
-        UpdateSample(x, head, action, coef, jumpOk, punchOk, learningRate);
+        UpdateSample(x, head, action, coef, mask, learningRate);
 
         Labeled l = replay[replayHead];
         Array.Copy(x, l.x, ObsSize);
         l.head = head;
         l.action = action;
         l.coef = coef;
-        l.jumpOk = jumpOk;
-        l.punchOk = punchOk;
+        for (int k = 0; k < SpecialCount; k++) l.mask[k] = mask[k];
         replayHead = (replayHead + 1) % ReplayCap;
         if (replayCount < ReplayCap) replayCount++;
     }
@@ -373,29 +383,31 @@ public class HumanFeedbackBrain
             for (int i = 0; i < Hidden; i++) s += w2[o + i] * h1[i];
             h2[j] = (float)Math.Tanh(s);
         }
-        for (int k = 0; k < 3; k++)
+        for (int k = 0; k < MoveCount; k++)
         {
             float a = bm[k];
+            int o = k * Hidden;
+            for (int j = 0; j < Hidden; j++) a += wm[o + j] * h2[j];
+            zm[k] = a;
+        }
+        for (int k = 0; k < SpecialCount; k++)
+        {
             float b = bs[k];
             int o = k * Hidden;
-            for (int j = 0; j < Hidden; j++)
-            {
-                a += wm[o + j] * h2[j];
-                b += ws[o + j] * h2[j];
-            }
-            zm[k] = a;
+            for (int j = 0; j < Hidden; j++) b += ws[o + j] * h2[j];
             zs[k] = b;
         }
     }
 
     private static void Softmax(float[] z, bool[] mask, float[] p)
     {
+        int n = z.Length;
         float max = float.NegativeInfinity;
-        for (int k = 0; k < 3; k++)
+        for (int k = 0; k < n; k++)
             if ((mask == null || mask[k]) && z[k] > max) max = z[k];
 
         float sum = 0f;
-        for (int k = 0; k < 3; k++)
+        for (int k = 0; k < n; k++)
         {
             if (mask == null || mask[k])
             {
@@ -407,40 +419,43 @@ public class HumanFeedbackBrain
                 p[k] = 0f;
             }
         }
-        for (int k = 0; k < 3; k++) p[k] /= sum;
+        for (int k = 0; k < n; k++) p[k] /= sum;
     }
 
     // 1サンプルぶんの更新：coef>0 でその行動を選びやすく、coef<0 で選びにくくする
-    private void UpdateSample(float[] x, int head, int action, float coef, bool jumpOk, bool punchOk, float lr)
+    private void UpdateSample(float[] x, int head, int action, float coef, bool[] mask, float lr)
     {
         if (coef == 0f) return;
 
         Forward(x, sh1, sh2, szm, szs);
 
-        gm[0] = gm[1] = gm[2] = 0f;
-        gs[0] = gs[1] = gs[2] = 0f;
+        for (int k = 0; k < MoveCount; k++) gm[k] = 0f;
+        for (int k = 0; k < SpecialCount; k++) gs[k] = 0f;
 
+        float pa;
         if (head == HeadMove)
         {
-            Softmax(szm, null, pTmp);
-            for (int k = 0; k < 3; k++) gm[k] = -coef * ((k == action ? 1f : 0f) - pTmp[k]);
+            Softmax(szm, null, pTmpM);
+            for (int k = 0; k < MoveCount; k++) gm[k] = -coef * ((k == action ? 1f : 0f) - pTmpM[k]);
+            pa = pTmpM[action];
         }
         else
         {
-            maskTmp[0] = true; maskTmp[1] = jumpOk; maskTmp[2] = punchOk;
-            Softmax(szs, maskTmp, pTmp);
-            for (int k = 0; k < 3; k++) gs[k] = -coef * ((k == action ? 1f : 0f) - pTmp[k]);
+            for (int k = 0; k < SpecialCount; k++) maskUpd[k] = (k == 0) || mask[k];
+            Softmax(szs, maskUpd, pTmpS);
+            for (int k = 0; k < SpecialCount; k++) gs[k] = -coef * ((k == action ? 1f : 0f) - pTmpS[k]);
+            pa = pTmpS[action];
         }
 
         // 歯止め：もう極端な確率の行動を、さらに押し込まない
-        float pa = pTmp[action];
         if ((coef < 0f && pa < pMin) || (coef > 0f && pa > pMax)) return;
 
         // 逆伝播（重みを更新する前に、前の層へ伝える値を計算する）
         for (int j = 0; j < Hidden; j++)
         {
             float d = 0f;
-            for (int k = 0; k < 3; k++) d += wm[k * Hidden + j] * gm[k] + ws[k * Hidden + j] * gs[k];
+            for (int k = 0; k < MoveCount; k++) d += wm[k * Hidden + j] * gm[k];
+            for (int k = 0; k < SpecialCount; k++) d += ws[k * Hidden + j] * gs[k];
             dpre2[j] = d * (1f - sh2[j] * sh2[j]);
         }
         for (int i = 0; i < Hidden; i++)
@@ -451,15 +466,16 @@ public class HumanFeedbackBrain
         }
 
         // 更新
-        for (int k = 0; k < 3; k++)
+        for (int k = 0; k < MoveCount; k++)
         {
             int o = k * Hidden;
-            for (int j = 0; j < Hidden; j++)
-            {
-                wm[o + j] -= lr * gm[k] * sh2[j];
-                ws[o + j] -= lr * gs[k] * sh2[j];
-            }
+            for (int j = 0; j < Hidden; j++) wm[o + j] -= lr * gm[k] * sh2[j];
             bm[k] -= lr * gm[k];
+        }
+        for (int k = 0; k < SpecialCount; k++)
+        {
+            int o = k * Hidden;
+            for (int j = 0; j < Hidden; j++) ws[o + j] -= lr * gs[k] * sh2[j];
             bs[k] -= lr * gs[k];
         }
         for (int j = 0; j < Hidden; j++)

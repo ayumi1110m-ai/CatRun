@@ -19,7 +19,8 @@ public class CatAnimator : MonoBehaviour
     public string walkState = "Walk";
     public string jumpState = "Jump";
     public string punchState = "Punch";
-    public string dashState = "Dash";       // ダッシュを入れたときに使う
+    public string dashAimState = "";        // ダッシュの構え（予備動作）のアニメ。空なら dashState を使う
+    public string dashState = "Dash";       // 走っている間のアニメ
     public string sitState = "Sit";
     public string loafState = "Loaf";       // 香箱座り（長く止まっているとき。スタミナの回復が速い）
 
@@ -109,7 +110,7 @@ public class CatAnimator : MonoBehaviour
         }
         else if (kind == 3)
         {
-            Play(dashState, true);
+            Play(string.IsNullOrEmpty(dashAimState) ? dashState : dashAimState, true);
         }
     }
 
@@ -194,9 +195,12 @@ public class CatAnimator : MonoBehaviour
         {
             idleTimer = 0f;
             if (cat.WindupKindId == 2) return punchState;
-            if (cat.WindupKindId == 3) return dashState;
+            if (cat.WindupKindId == 3) return string.IsNullOrEmpty(dashAimState) ? dashState : dashAimState;
             return jumpState;
         }
+
+        // ダッシュで走っている間
+        if (cat.IsDashing) { idleTimer = 0f; return dashState; }
 
         // 硬直中は、そのままパンチのアニメ
         if (cat.IsRecovering) { idleTimer = 0f; return punchState; }
