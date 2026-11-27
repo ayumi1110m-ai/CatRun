@@ -187,6 +187,11 @@ public class CatAgent : MonoBehaviour
     public event System.Action DashPerformed;                   // ダッシュで走り出した
 
     public HumanFeedbackBrain MoveBrain => moveBrain;
+    public int LastMove => lastMove;                            // 直近の決定で選ばれた移動（0=止まる, 1=左, 2=右）
+    public int LastSpecial => lastSpecial;                      // 直近の決定で選ばれた特技（0=しない, 1=ジャンプ, 2=パンチ, 3=ダッシュ）
+    public bool[] SpecialAllowed => specialMask;                // 直近の決定で、出せた特技（モニター表示用）
+    private int lastMove = 0;
+    private int lastSpecial = 0;
     public HumanFeedbackBrain SpecialBrain => specialBrain;
 
     // 直近の決定で猫が受け取った観測値（脳への入力にも使う。シーンには保存しない）
@@ -451,6 +456,8 @@ public class CatAgent : MonoBehaviour
         specialMask[PunchIndex] = punchOk;
         specialMask[DashIndex] = dashOk;
         specialBrain.Decide(specialObs, specialMask, 0f, now, out ignoredMove, out special);
+        lastMove = move;
+        lastSpecial = special;
         ApplyActions(move, special);
     }
 

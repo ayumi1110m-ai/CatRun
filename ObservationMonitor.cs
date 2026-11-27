@@ -30,6 +30,12 @@ public class ObservationMonitor : MonoBehaviour
 
     private readonly List<TailPoint> tail = new List<TailPoint>();
     private readonly float[] shown = new float[29];
+    private readonly float[] moveShown = new float[3];
+    private readonly float[] specShown = new float[4];
+    private int specChosen = 0;
+    private float specChosenTimer = 0f;
+    private static readonly string[] moveNames = { "止まる", "左", "右" };
+    private static readonly string[] specNames = { "しない", "ジャンプ", "パンチ", "ダッシュ" };
     private GUIStyle titleStyle, labelStyle, valueStyle, hintStyle;
 
     private static readonly string[] groupTitles =
@@ -73,6 +79,21 @@ public class ObservationMonitor : MonoBehaviour
                 shown[i] = Mathf.MoveTowards(shown[i], obs[i], Time.unscaledDeltaTime * 4f);
             else
                 shown[i] = obs[i];
+        }
+
+        // 行動の確率（見た目だけ、少しなめらかにする）
+        HumanFeedbackBrain mb = cat.MoveBrain;
+        HumanFeedbackBrain sb = cat.SpecialBrain;
+        if (mb != null && sb != null)
+        {
+            float k = 1f - Mathf.Exp(-Time.unscaledDeltaTime * 12f);
+            for (int i = 0; i < moveShown.Length; i++) moveShown[i] = Mathf.Lerp(moveShown[i], mb.MoveProbs[i], k);
+            for (int i = 0; i < specShown.Length; i++) specShown[i] = Mathf.Lerp(specShown[i], sb.SpecialProbs[i], k);
+
+            // 技が選ばれたのは1決定だけなので、少し残して見えるようにする
+            if (cat.LastSpecial != 0) { specChosen = cat.LastSpecial; specChosenTimer = 0.6f; }
+            specChosenTimer -= Time.unscaledDeltaTime;
+            if (specChosenTimer <= 0f) specChosen = 0;
         }
     }
 
@@ -161,6 +182,74 @@ public class ObservationMonitor : MonoBehaviour
 
             y += Mathf.Ceil(groupLabels[g].Length / 2f) * rowH + gap;
         }
+
+        DrawProbPanel(u, x0, y0 + h + 10f * u, w);
+    }
+
+    // 猫の行動の確率（移動の脳・特技の脳）
+    private void DrawProbPanel(float u, float x0, float y0, float w)
+    {
+        if (cat == null || cat.MoveBrain == null) return;
+
+        float pad = 12f * u;
+        float rowH = 24f * u;
+        float titleH = 22f * u;
+        float gap = 10f * u;
+        float h = pad + titleH + moveShown.Length * rowH + gap + titleH + specShown.Length * rowH + pad;
+        DrawRect(new Rect(x0, y0, w, h), new Color(0f, 0f, 0f, 0.6f));
+
+        float y = y0 + pad;
+        GUI.Label(new Rect(x0 + pad, y, w - pad * 2f, titleH), "移動の脳（確率）", titleStyle);
+        y += titleH;
+        for (int k = 0; k < moveShown.Length; k++)
+        {
+            DrawProbRow(u, x0 + pad, y, w - pad * 2f, rowH, moveNames[k], moveShown[k],
+                        Mathf.Clamp01(moveShown[k]), true, k == cat.LastMove);
+            y += rowH;
+        }
+        y += gap;
+
+        GUI.Label(new Rect(x0 + pad, y, w - pad * 2f, titleH), "特技の脳（確率・棒は対数）", titleStyle);
+        y += titleH;
+        bool[] allowed = cat.SpecialAllowed;
+        for (int k = 0; k < specShown.Length; k++)
+        {
+            // 棒の長さ：0.1%で0、100%で満タン（小さな確率の変化も見えるように）
+            float len = Mathf.Clamp01((Mathf.Log10(Mathf.Max(specShown[k], 0.0001f)) + 3f) / 3f);
+            bool ok = (k == 0) || (allowed != null && allowed[k]);
+            DrawProbRow(u, x0 + pad, y, w - pad * 2f, rowH, specNames[k], specShown[k], len, ok, k == specChosen);
+            y += rowH;
+        }
+    }
+
+    private void DrawProbRow(float u, float x, float y, float w, float rowH, string label,
+                             float p, float barLen, bool enabled, bool chosen)
+    {
+        float labelW = 70f * u;
+        float valueW = 56f * u;
+        float barX = x + labelW;
+        float barW = w - labelW - valueW - 6f * u;
+        float barH = 14f * u;
+        float barY = y + (rowH - barH) * 0.5f;
+
+        GUI.Label(new Rect(x, y, labelW, rowH), label, labelStyle);
+
+        DrawRect(new Rect(barX, barY, barW, barH), new Color(1f, 1f, 1f, 0.12f));
+        Color c = enabled ? new Color(55f / 255f, 138f / 255f, 221f / 255f, 0.95f) : new Color(0.5f, 0.5f, 0.5f, 0.6f);
+        DrawRect(new Rect(barX, barY, barW * barLen, barH), c);
+
+        if (chosen)
+        {
+            float t = Mathf.Max(1f, 2f * u);
+            Color o = new Color(1f, 0.82f, 0.4f, 1f);
+            DrawRect(new Rect(barX - t, barY - t, barW + t * 2f, t), o);
+            DrawRect(new Rect(barX - t, barY + barH, barW + t * 2f, t), o);
+            DrawRect(new Rect(barX - t, barY - t, t, barH + t * 2f), o);
+            DrawRect(new Rect(barX + barW, barY - t, t, barH + t * 2f), o);
+        }
+
+        string txt = p < 0.1f ? (p * 100f).ToString("F1") + "%" : (p * 100f).ToString("F0") + "%";
+        GUI.Label(new Rect(x + w - valueW, y, valueW, rowH), txt, valueStyle);
     }
 
     private void EnsureStyles(float u)
